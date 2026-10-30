@@ -8,9 +8,10 @@ services:
     runtime: node
     region: singapore          # ใกล้ลาวที่สุด
     plan: free              # free จะ sleep หลังไม่มีคนใช้ 15 นาที (ตื่นช้า ~1 นาที) — ไม่เหมาะช่วงแคมเปญ
-    buildCommand: npm ci --include=dev && npm run build
+    buildCommand: npm install --include=dev && npm run build
     startCommand: npm run start
     healthCheckPath: /api/health
+    
     autoDeploy: true
     envVars:
       - key: NODE_VERSION
