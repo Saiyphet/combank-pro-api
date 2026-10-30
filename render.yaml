@@ -1,0 +1,33 @@
+# Render Blueprint — lucky-draw-api
+# Render Dashboard → New → Blueprint → เลือก repo นี้
+# ค่าที่ sync: false ต้องกรอกเองใน Dashboard (ห้าม commit ค่า secret)
+
+services:
+  - type: web
+    name: lucky-draw-api
+    runtime: node
+    region: singapore          # ใกล้ลาวที่สุด
+    plan: starter              # free จะ sleep หลังไม่มีคนใช้ 15 นาที (ตื่นช้า ~1 นาที) — ไม่เหมาะช่วงแคมเปญ
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm run start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: TRUST_PROXY
+        value: "1"
+      - key: JWT_EXPIRES_IN
+        value: 12h
+      - key: JWT_SECRET
+        generateValue: true    # Render สุ่มค่าให้ (ยาวพอ)
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false            # URL ของ frontend เช่น https://lucky-draw-web.onrender.com
+      - key: CAMPAIGN_START
+        sync: false
+      - key: CAMPAIGN_END
+        sync: false
