@@ -60,6 +60,11 @@ export class PlayerService {
 
   /** วงล้อหลัก */
   async spin(playerId: string) {
+    const thatLuangOnly = must(
+      await this.sb.db.from('tl_only_players').select('player_id').eq('player_id', playerId).maybeSingle(),
+    );
+    if (thatLuangOnly) throw new AppError(403, 'CAMPAIGN_CLOSED');
+
     const { data, error } = await this.sb.db.rpc('ld_spin', { p_player_id: playerId });
     if (error) throwRpcError(error);
     const r = data as RpcSpinResult;

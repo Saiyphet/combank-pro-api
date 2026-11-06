@@ -55,6 +55,12 @@ export class ThatLuangAdminService {
       throw new AppError(409, 'PLAYER_ALREADY_EXISTS', { username, club: club.code.toUpperCase() });
     }
     if (error) throw error;
+    // hands_count above only satisfies Halloween's column: this account gets no Halloween spin.
+    const marked = await this.sb.db.from('tl_only_players').insert({ player_id: data.id });
+    if (marked.error) {
+      await this.sb.db.from('ld_players').delete().eq('id', data.id);
+      throw marked.error;
+    }
     return {
       id: data.id,
       username,

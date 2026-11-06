@@ -24,6 +24,13 @@ create table tl_hands (
 create index tl_hands_board on tl_hands (tier, hands desc);
 alter table tl_hands enable row level security;
 
+-- Accounts made from the That Luang admin skip Halloween's hands check, so the API gives them no Halloween spin.
+create table tl_only_players (
+  player_id   uuid primary key references ld_players(id) on delete cascade,
+  created_at  timestamptz not null default now()
+);
+alter table tl_only_players enable row level security;
+
 -- Same shape as ld_prizes plus tier. prize_group: CASH shows at once, BONUS sits in a box the player opens.
 create table tl_prizes (
   id             uuid primary key default gen_random_uuid(),

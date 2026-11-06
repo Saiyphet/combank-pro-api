@@ -211,14 +211,26 @@ async function withApi(port, env, fn) {
   assert.ok((await call('POST', `/admin/tl/players/${t.id}/reset-password`, { token: admin })).newPassword);
   await call('POST', '/admin/tl/reports/hands', { token: admin, body: { csv: `xpoker_id,stakes,hands\n${tId},5/10,${tiers.find((x) => x.tier === 'silver').handsTarget}\n` } });
   assert.ok((await call('POST', '/spin/silver', { token: second })).prize.name);
-  const hw = await call('POST', '/spin', { token: second });
-  assert.ok(['CASH_PENDING', 'DONE'].includes(hw.status));
-  if (hw.status === 'CASH_PENDING') await call('POST', '/spin/cash', { token: second });
-  else await call('POST', '/spin/cash', { token: second, expect: 400, error: 'NOT_CASH_SEGMENT' });
+  await call('POST', '/spin', { token: second, expect: 403, error: 'CAMPAIGN_CLOSED' });
   m = await me(second);
   assert.equal(m.tiers.silver.status, 'done');
+  assert.equal(m.spinStatus, 'NOT_SPUN');
+  step('A player made in /admin/tl/players can log in and spin That Luang, but gets no Halloween spin');
+
+  // The other order: a Halloween player spins That Luang first, then Halloween
+  const bId = `SMOKEB${stamp}`;
+  const b = await call('POST', '/admin/players', { token: admin, expect: 201, body: { xpokerPlayerId: bId, clubName: 'CB', displayName: `Smoke B ${stamp}`, handsCount: 2000 } });
+  const third = (await call('POST', '/auth/login', { body: { username: b.username, password: b.initialPassword } })).accessToken;
+  await call('POST', '/admin/tl/reports/hands', { token: admin, body: { csv: `xpoker_id,stakes,hands\n${bId},5/10,${tiers.find((x) => x.tier === 'silver').handsTarget}\n` } });
+  assert.ok((await call('POST', '/spin/silver', { token: third })).prize.name);
+  const hw = await call('POST', '/spin', { token: third });
+  assert.ok(['CASH_PENDING', 'DONE'].includes(hw.status));
+  if (hw.status === 'CASH_PENDING') await call('POST', '/spin/cash', { token: third });
+  else await call('POST', '/spin/cash', { token: third, expect: 400, error: 'NOT_CASH_SEGMENT' });
+  m = await me(third);
+  assert.equal(m.tiers.silver.status, 'done');
   assert.equal(m.spinStatus, 'DONE');
-  step('A player made in /admin/tl/players can log in, and That Luang then Halloween do not block each other');
+  step('That Luang then Halloween do not block each other');
 
   // ---------- Each event opens on its own dates. Both players have spun, so nothing is given out here. ----------
   const past = '2020-01-01T00:00:00Z';
