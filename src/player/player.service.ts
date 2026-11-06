@@ -5,6 +5,7 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { AppError, must, throwRpcError } from '../common/app-error';
 import { PlayerRow, RpcSpinResult, mapRowSpin, mapRpcPrize } from '../common/mappers';
 import { WheelService } from './wheel.service';
+import { ThatLuangPlayerService } from '../thatluang/thatluang-player.service';
 import { LoginDto } from './login.dto';
 
 @Injectable()
@@ -13,6 +14,7 @@ export class PlayerService {
     private readonly sb: SupabaseService,
     private readonly jwt: JwtService,
     private readonly wheels: WheelService,
+    private readonly thatLuang: ThatLuangPlayerService,
   ) {}
 
   async login(dto: LoginDto) {
@@ -30,11 +32,7 @@ export class PlayerService {
     if (!user.is_active) throw new AppError(403, 'PLAYER_DISABLED');
 
     const accessToken = await this.jwt.signAsync({ sub: user.id, role: 'player' });
-    const me = await this.me(user.id);
-    return {
-      accessToken,
-      player: { id: me.id, displayName: me.displayName, spinStatus: me.spinStatus },
-    };
+    return { accessToken, player: await this.me(user.id) };
   }
 
   async me(playerId: string) {
@@ -52,6 +50,7 @@ export class PlayerService {
       handsCount: row.hands_count,
       spinStatus: row.spin_status,
       spin: mapRowSpin(row),
+      ...(await this.thatLuang.progress(row.id)),
     };
   }
 

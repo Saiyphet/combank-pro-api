@@ -1,0 +1,47 @@
+# Local test database for the merged Halloween and That Luang API (own name, volume and ports): Postgres + PostgREST, served under /rest/v1 like Supabase.
+# First time: `node local-dev/setup.mjs`, then `docker compose -f local-dev/docker-compose.yml up -d`.
+# Only listens on 127.0.0.1. Never point this at real data.
+name: base-local
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run node local-dev/setup.mjs first}
+    ports: ["127.0.0.1:55342:5432"]
+    volumes:
+      - db:/var/lib/postgresql/data
+      # Runs once, in name order, when the volume is empty: the Halloween history and its data, then That Luang on top.
+      - ./sql/00_supabase_roles.sql:/docker-entrypoint-initdb.d/00_supabase_roles.sql:ro
+      - ../supabase/migrations/001_init.sql:/docker-entrypoint-initdb.d/10_001_init.sql:ro
+      - ../supabase/migrations/002_custom_wheel_weights.sql:/docker-entrypoint-initdb.d/11_002_custom_wheel_weights.sql:ro
+      - ../supabase/migrations/003_admin_players_view.sql:/docker-entrypoint-initdb.d/12_003_admin_players_view.sql:ro
+      - ./sql/20_missing_schema.sql:/docker-entrypoint-initdb.d/20_missing_schema.sql:ro
+      - ./sql/30_seed_halloween.sql:/docker-entrypoint-initdb.d/30_seed_halloween.sql:ro
+      - ../supabase/migrations/004_that_luang.sql:/docker-entrypoint-initdb.d/35_004_that_luang.sql:ro
+      - ./sql/40_seed_thatluang.sql:/docker-entrypoint-initdb.d/40_seed_thatluang.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]   # TCP is up only after the init scripts
+      interval: 2s
+      retries: 60
+
+  rest:
+    image: postgrest/postgrest:v12.2.3
+    environment:
+      PGRST_DB_URI: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET:?run node local-dev/setup.mjs first}
+    depends_on:
+      db: { condition: service_healthy }
+
+  # supabase-js calls <SUPABASE_URL>/rest/v1/...; PostgREST serves at /.
+  gateway:
+    image: nginx:1.27-alpine
+    ports: ["127.0.0.1:55341:80"]
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on: [rest]
+
+volumes:
+  db:

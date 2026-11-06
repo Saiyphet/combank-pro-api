@@ -8,7 +8,8 @@
     "start": "node dist/main.js",
     "start:dev": "nest start --watch",
     "create-admin": "node scripts/create-admin.js",
-    "smoke-test": "node scripts/smoke-test.js"
+    "smoke-test": "node scripts/smoke-test.js",
+    "smoke-both": "node scripts/smoke-both.js"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",

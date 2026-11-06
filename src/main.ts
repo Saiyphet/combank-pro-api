@@ -7,6 +7,7 @@ import { AllExceptionsFilter } from './common/all-exceptions.filter';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  app.useBodyParser('json', { limit: '2mb' }); // the hands report; the default of 100 KB fits only a few thousand rows
 
   // อยู่หลัง ingress / reverse proxy: ใช้ IP จริงของผู้ใช้จาก X-Forwarded-For
   // ไม่ตั้ง = ทุกคนจะได้ IP ของ ingress แล้วใช้โควตา login ร่วมกัน
