@@ -1,3 +1,4 @@
+import { AdminScopeService } from '../admin/admin-scope.service';
 import { Injectable } from '@nestjs/common';
 import * as bcrypt from 'bcryptjs';
 import { randomInt } from 'crypto';
@@ -27,11 +28,16 @@ interface PrizeRow {
 
 @Injectable()
 export class ThatLuangAdminService {
-  constructor(private readonly sb: SupabaseService) {}
+  constructor(
+    private readonly sb: SupabaseService,
+    private readonly scope: AdminScopeService,
+  ) {}
 
   // ---------- players ----------
   async createPlayer(adminId: string, dto: CreatePlayerDto) {
     const club = await this.findClub(dto.clubName);
+    const scope = await this.scope.of(adminId);
+    if (scope.clubId && club.id !== scope.clubId) throw new AppError(403, 'CLUB_NOT_ALLOWED');
     const xpokerId = dto.xpokerPlayerId.trim();
     // username = prefix ของ club + X-Poker ID เช่น cb45678
     const username = `${club.username_prefix}${xpokerId}`.toLowerCase();
@@ -70,14 +76,11 @@ export class ThatLuangAdminService {
   }
 
   // ---------- clubs ----------
-  async listClubs() {
-    const rows = must(
-      await this.sb.db
-        .from('ld_clubs')
-        .select('code, name, username_prefix, xpoker_club_id')
-        .eq('is_active', true)
-        .order('code'),
-    ) as { code: string; name: string; username_prefix: string; xpoker_club_id: string | null }[];
+  async listClubs(adminId: string) {
+    const scope = await this.scope.of(adminId);
+    let query = this.sb.db.from('ld_clubs').select('code, name, username_prefix, xpoker_club_id').eq('is_active', true);
+    if (scope.clubCode) query = query.eq('code', scope.clubCode);
+    const rows = must(await query.order('code')) as { code: string; name: string; username_prefix: string; xpoker_club_id: string | null }[];
     return rows.map((c) => ({
       code: c.code.toUpperCase(),
       name: c.name,
@@ -112,14 +115,17 @@ export class ThatLuangAdminService {
     return club;
   }
 
-  async listPlayers(q: ListPlayersQuery) {
+  async listPlayers(adminId: string, q: ListPlayersQuery) {
+    const scope = await this.scope.of(adminId);
     let query = this.sb.db.from('tl_admin_players').select('*', { count: 'exact' });
     if (q.spinStatus === 'NOT_SPUN') query = query.eq('spins', '[]');
     if (q.spinStatus === 'DONE') query = query.neq('spins', '[]');
     // A string: supabase-js would write an array as a Postgres array, and spins is jsonb
     if (q.prizeCode) query = query.contains('spins', JSON.stringify([{ prize_code: q.prizeCode }]));
     if (q.fulfillment) query = query.contains('spins', JSON.stringify([{ fulfillment_status: q.fulfillment }]));
-    if (q.club) query = query.eq('club_code', q.club.trim().toLowerCase());
+    // An Admin always gets their own club, whatever the filter asks for.
+    const club = scope.clubCode ?? q.club?.trim().toLowerCase();
+    if (club) query = query.eq('club_code', club);
     if (q.q) {
       const term = q.q.replace(/[,()%*\\]/g, ' ').trim();
       if (term) {
@@ -142,23 +148,23 @@ export class ThatLuangAdminService {
     };
   }
 
-  async getPlayer(id: string) {
-    return toAdminPlayer(await this.playerRow(id));
+  async getPlayer(adminId: string, id: string) {
+    return toAdminPlayer(await this.playerRow(adminId, id));
   }
 
-  async updatePlayer(id: string, dto: UpdatePlayerDto) {
-    await this.playerRow(id);
+  async updatePlayer(adminId: string, id: string, dto: UpdatePlayerDto) {
+    await this.playerRow(adminId, id);
     const patch: Record<string, unknown> = {};
     if (dto.displayName !== undefined) patch.display_name = dto.displayName.trim();
     if (dto.isActive !== undefined) patch.is_active = dto.isActive;
     if (Object.keys(patch).length) {
       must(await this.sb.db.from('ld_players').update(patch).eq('id', id).select('id'));
     }
-    return this.getPlayer(id);
+    return this.getPlayer(adminId, id);
   }
 
-  async resetPassword(id: string) {
-    const row = await this.playerRow(id);
+  async resetPassword(adminId: string, id: string) {
+    const row = await this.playerRow(adminId, id);
     const password = generatePassword();
     must(
       await this.sb.db
@@ -170,11 +176,13 @@ export class ThatLuangAdminService {
     return { id, username: row.username, newPassword: password };
   }
 
-  private async playerRow(id: string) {
+  private async playerRow(adminId: string, id: string) {
+    const scope = await this.scope.of(adminId);
     const row = must(
       await this.sb.db.from('tl_admin_players').select('*').eq('id', id).maybeSingle(),
     ) as PlayerRow | null;
-    if (!row) throw new AppError(404, 'PLAYER_NOT_FOUND');
+    // To an Admin, another club's player does not exist.
+    if (!row || (scope.clubCode && row.club_code !== scope.clubCode)) throw new AppError(404, 'PLAYER_NOT_FOUND');
     return row;
   }
 
@@ -184,6 +192,7 @@ export class ThatLuangAdminService {
       await this.sb.db.from('tl_spins').select('id, player_id').eq('id', spinId).maybeSingle(),
     ) as { id: string; player_id: string } | null;
     if (!spin) throw new AppError(404, 'SPIN_NOT_FOUND');
+    await this.playerRow(adminId, spin.player_id);
 
     const delivered = dto.status === 'DELIVERED';
     const patch: Record<string, unknown> = {
@@ -194,7 +203,7 @@ export class ThatLuangAdminService {
     if (dto.note !== undefined) patch.note = dto.note;
 
     must(await this.sb.db.from('tl_spins').update(patch).eq('id', spinId).select('id'));
-    return this.getPlayer(spin.player_id);
+    return this.getPlayer(adminId, spin.player_id);
   }
 
   // ---------- hands report ----------
@@ -258,10 +267,7 @@ export class ThatLuangAdminService {
 
   /** SUPER only. The level's prizes must add up to 100%, unless it has none yet. */
   async saveTier(adminId: string, tier: Tier, dto: SaveTierDto) {
-    const admin = must(
-      await this.sb.db.from('ld_admins').select('role').eq('id', adminId).maybeSingle(),
-    ) as { role: string } | null;
-    if (admin?.role !== 'SUPER') throw new AppError(403, 'SUPER_ADMIN_ONLY');
+    await this.scope.requireSuper(adminId);
 
     const prizes = dto.prizes.map((p) => ({
       code: p.code,
@@ -285,9 +291,10 @@ export class ThatLuangAdminService {
   }
 
   // ---------- summary / export ----------
-  async summary() {
+  async summary(adminId: string) {
+    const scope = await this.scope.of(adminId);
     const [rows, prizeRes, importRes] = await Promise.all([
-      this.allRows(),
+      this.allRows(scope.clubCode),
       this.sb.db.from('tl_prizes').select('qty_total, qty_remaining').eq('is_active', true),
       this.sb.db.from('ld_settings').select('value').eq('key', 'last_hands_import_at').maybeSingle(),
     ]);
@@ -309,7 +316,8 @@ export class ThatLuangAdminService {
         spun: rows.filter((r) => r.spins.length).length,
       },
       spinsByTier: Object.fromEntries(TIERS.map((t) => [t, spinCount((s) => s.tier === t)])),
-      prizes: { total: totalQty, given: totalQty - remainingQty, remaining: remainingQty },
+      // Prize stock belongs to the whole event, so a club Admin does not get it.
+      ...(scope.isSuper ? { prizes: { total: totalQty, given: totalQty - remainingQty, remaining: remainingQty } } : {}),
       cashPaidLak: cashSum('DELIVERED'),
       cashPendingLak: cashSum('PENDING'),
       fulfillment: {
@@ -322,8 +330,9 @@ export class ThatLuangAdminService {
   }
 
   /** One line per spin */
-  async exportCsv() {
-    const rows = await this.allRows();
+  async exportCsv(adminId: string) {
+    const scope = await this.scope.of(adminId);
+    const rows = await this.allRows(scope.clubCode);
     const header = [
       'club_name', 'username', 'display_name', 'xpoker_player_id', 'tier', 'hands', 'prize_code', 'prize_name',
       'prize_value_lak', 'spun_at', 'fulfillment_status', 'delivered_by', 'delivered_at', 'note',
@@ -340,10 +349,11 @@ export class ThatLuangAdminService {
     return '﻿' + [header.join(','), ...lines].join('\r\n');
   }
 
-  private allRows() {
-    return fetchAll<PlayerRow>((from, to) =>
-      this.sb.db.from('tl_admin_players').select('*').order('created_at').range(from, to),
-    );
+  private allRows(clubCode: string | null = null) {
+    return fetchAll<PlayerRow>((from, to) => {
+      const query = this.sb.db.from('tl_admin_players').select('*');
+      return (clubCode ? query.eq('club_code', clubCode) : query).order('created_at').range(from, to);
+    });
   }
 }
 

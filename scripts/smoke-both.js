@@ -245,6 +245,40 @@ async function withApi(port, env, fn) {
   });
   step('CAMPAIGN_END in the past closes /spin but not /spin/bronze');
 
+  // ---------- An Admin works inside one club. Test Club B comes from local-dev/sql/50_seed_admin_clubs.sql. ----------
+  const staff = (await call('POST', '/admin/auth/login', { body: { username: 'local.staff', password: adminPass } })).accessToken;
+  const other = (await call('GET', '/admin/players?club=lt&limit=1', { token: admin })).items[0];
+  assert.ok(other, 'Super Admin should see the other club');
+  for (const prefix of ['/admin', '/admin/tl']) {
+    const clubs = await call('GET', `${prefix}/clubs`, { token: staff });
+    assert.deepEqual(clubs.map((c) => c.code), ['CB']);
+    const asked = await call('GET', `${prefix}/players?club=lt&limit=50`, { token: staff });
+    assert.ok(asked.items.length && asked.items.every((p) => p.club.code === 'CB'), 'an Admin must get only their own club');
+    await call('GET', `${prefix}/players/${other.id}`, { token: staff, expect: 404, error: 'PLAYER_NOT_FOUND' });
+    await call('POST', `${prefix}/players/${other.id}/reset-password`, { token: staff, expect: 404, error: 'PLAYER_NOT_FOUND' });
+    await call('GET', `${prefix}/prizes`, { token: staff, expect: 403, error: 'SUPER_ADMIN_ONLY' });
+    const summary = await call('GET', `${prefix}/summary`, { token: staff });
+    assert.equal(summary.prizes, undefined);
+    assert.equal(summary.players.total, (await call('GET', `${prefix}/players?limit=1`, { token: staff })).total);
+    assert.ok(!String(await call('GET', `${prefix}/spins/export`, { token: staff })).includes('Test Club B'));
+    await call('POST', `${prefix}/players`, { token: staff, expect: 403, error: 'CLUB_NOT_ALLOWED', body: { xpokerPlayerId: `no${Date.now()}`, clubName: 'lt', displayName: 'Not allowed', ...(prefix === '/admin' ? { handsCount: 2000 } : {}) } });
+  }
+  await call('POST', '/admin/tl/reports/hands', { token: staff, expect: 403, error: 'SUPER_ADMIN_ONLY', body: { csv: 'xpoker_id,stakes,hands\n1,1/2,1' } });
+  await call('GET', '/admin/admins', { token: staff, expect: 403, error: 'SUPER_ADMIN_ONLY' });
+  step('an Admin sees only their own club, and no prizes, import or admin accounts');
+
+  const name = `smoke.${Date.now()}`;
+  await call('POST', '/admin/admins', { token: admin, expect: 400, error: 'CLUB_REQUIRED', body: { username: name, role: 'STAFF' } });
+  const made = await call('POST', '/admin/admins', { token: admin, expect: 201, body: { username: name, role: 'STAFF', clubCode: 'lt' } });
+  await call('POST', '/admin/admins', { token: admin, expect: 409, error: 'ADMIN_ALREADY_EXISTS', body: { username: name, role: 'STAFF', clubCode: 'lt' } });
+  const madeToken = (await call('POST', '/admin/auth/login', { body: { username: name, password: made.initialPassword } })).accessToken;
+  assert.deepEqual((await call('GET', '/admin/clubs', { token: madeToken })).map((c) => c.code), ['LT']);
+  await call('PATCH', `/admin/admins/${made.id}`, { token: admin, body: { isActive: false } });
+  await call('GET', '/admin/clubs', { token: madeToken, expect: 401 });
+  const self = (await call('GET', '/admin/admins', { token: admin })).find((a) => a.username === adminUser);
+  await call('PATCH', `/admin/admins/${self.id}`, { token: admin, expect: 400, error: 'ADMIN_CANNOT_CHANGE_SELF', body: { isActive: false } });
+  step('a Super Admin adds and switches off Admins, and cannot lock themselves out');
+
   console.log('\nBoth events passed.');
   process.exit(0);
 })().catch((e) => {

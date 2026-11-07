@@ -78,3 +78,9 @@ docker compose -f local-dev/docker-compose.yml up -d
 - ต้องรัน `004` **ก่อน** ขึ้น API ตัวนี้ เพราะ `/me` และล็อกอินอ่าน `tl_*` ถ้ายังไม่มีจะล็อกอินไม่ได้ทั้งสองกิจกรรม และ `render.yaml` ตั้ง `autoDeploy: true` การ push เข้า branch หลักจึงขึ้นทันที
 - ผู้เล่นที่สร้างจาก `POST /api/admin/tl/players` ได้ `hands_count = 1666` เพราะคอลัมน์นี้บังคับอย่างน้อย 1666 และ `ld_spin` ไม่ตรวจ Hands คนกลุ่มนี้จึงหมุน Halloween ได้ด้วยถ้าช่วง `CAMPAIGN_*` ยังเปิดอยู่
 - `supabase/migrations/` ใน repo ไม่ครบเมื่อเทียบกับโค้ด (ขาดตาราง `ld_clubs`, `ld_weight_changes` และคอลัมน์ `ld_players.club_id`) `sql/20_missing_schema.sql` สร้างส่วนที่ขาดบนเครื่อง โดยเดาจากโค้ด ควรเทียบกับ schema จริงก่อนรัน `004`
+
+## สิทธิ์ Admin
+
+- `local.super`: Super Admin เห็นทุก Club และมีเมนู Admins
+- `local.staff`: Admin ของ ComBank CLUB เห็นเฉพาะ Dashboard ผู้เล่น และเพิ่มผู้เล่นใน Club ตัวเอง
+- `local-dev/sql/50_seed_admin_clubs.sql` เพิ่ม Test Club B และผู้เล่น `lt20001` ถึง `lt20003` เพื่อเช็กว่า Admin มองไม่เห็น Club อื่น

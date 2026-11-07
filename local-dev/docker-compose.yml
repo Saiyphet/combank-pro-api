@@ -20,6 +20,8 @@ services:
       - ./sql/30_seed_halloween.sql:/docker-entrypoint-initdb.d/30_seed_halloween.sql:ro
       - ../supabase/migrations/004_that_luang.sql:/docker-entrypoint-initdb.d/35_004_that_luang.sql:ro
       - ./sql/40_seed_thatluang.sql:/docker-entrypoint-initdb.d/40_seed_thatluang.sql:ro
+      - ../supabase/migrations/005_admin_clubs.sql:/docker-entrypoint-initdb.d/45_005_admin_clubs.sql:ro
+      - ./sql/50_seed_admin_clubs.sql:/docker-entrypoint-initdb.d/50_seed_admin_clubs.sql:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]   # TCP is up only after the init scripts
       interval: 2s

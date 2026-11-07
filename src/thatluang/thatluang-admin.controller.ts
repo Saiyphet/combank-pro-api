@@ -12,6 +12,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { AdminScopeService } from '../admin/admin-scope.service';
 import { AdminGuard, CurrentUser, JwtPayload } from '../common/auth.guards';
 import { parseTier } from './mappers';
 import {
@@ -28,11 +29,14 @@ import { ThatLuangAdminService } from './thatluang-admin.service';
 @UseGuards(AdminGuard)
 @Controller('admin/tl')
 export class ThatLuangAdminController {
-  constructor(private readonly admin: ThatLuangAdminService) {}
+  constructor(
+    private readonly admin: ThatLuangAdminService,
+    private readonly scope: AdminScopeService,
+  ) {}
 
   @Get('clubs')
-  clubs() {
-    return this.admin.listClubs();
+  clubs(@CurrentUser() user: JwtPayload) {
+    return this.admin.listClubs(user.sub);
   }
 
   @Post('players')
@@ -41,24 +45,24 @@ export class ThatLuangAdminController {
   }
 
   @Get('players')
-  listPlayers(@Query() q: ListPlayersQuery) {
-    return this.admin.listPlayers(q);
+  listPlayers(@CurrentUser() user: JwtPayload, @Query() q: ListPlayersQuery) {
+    return this.admin.listPlayers(user.sub, q);
   }
 
   @Get('players/:id')
-  getPlayer(@Param('id', ParseUUIDPipe) id: string) {
-    return this.admin.getPlayer(id);
+  getPlayer(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
+    return this.admin.getPlayer(user.sub, id);
   }
 
   @Patch('players/:id')
-  updatePlayer(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdatePlayerDto) {
-    return this.admin.updatePlayer(id, dto);
+  updatePlayer(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdatePlayerDto) {
+    return this.admin.updatePlayer(user.sub, id, dto);
   }
 
   @Post('players/:id/reset-password')
   @HttpCode(200)
-  resetPassword(@Param('id', ParseUUIDPipe) id: string) {
-    return this.admin.resetPassword(id);
+  resetPassword(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
+    return this.admin.resetPassword(user.sub, id);
   }
 
   @Patch('spins/:id/fulfillment')
@@ -72,12 +76,14 @@ export class ThatLuangAdminController {
 
   @Post('reports/hands')
   @HttpCode(200)
-  importHands(@Body() dto: ImportHandsDto) {
+  async importHands(@CurrentUser() user: JwtPayload, @Body() dto: ImportHandsDto) {
+    await this.scope.requireSuper(user.sub);
     return this.admin.importHands(dto.csv);
   }
 
   @Get('prizes')
-  prizes() {
+  async prizes(@CurrentUser() user: JwtPayload) {
+    await this.scope.requireSuper(user.sub);
     return this.admin.prizes();
   }
 
@@ -87,14 +93,14 @@ export class ThatLuangAdminController {
   }
 
   @Get('summary')
-  summary() {
-    return this.admin.summary();
+  summary(@CurrentUser() user: JwtPayload) {
+    return this.admin.summary(user.sub);
   }
 
   @Get('spins/export')
   @Header('Content-Type', 'text/csv; charset=utf-8')
   @Header('Content-Disposition', 'attachment; filename="that-luang-winners.csv"')
-  exportCsv() {
-    return this.admin.exportCsv();
+  exportCsv(@CurrentUser() user: JwtPayload) {
+    return this.admin.exportCsv(user.sub);
   }
 }

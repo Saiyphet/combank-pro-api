@@ -8,10 +8,13 @@ import { AppError, must, throwRpcError } from '../common/app-error';
 import { PlayerRow, mapRowPrize } from '../common/mappers';
 import { LoginDto } from '../player/login.dto';
 import { WheelService } from '../player/wheel.service';
+import { AdminScopeService } from './admin-scope.service';
 import {
+  CreateAdminDto,
   CreatePlayerDto,
   FulfillmentDto,
   ListPlayersQuery,
+  UpdateAdminDto,
   UpdatePlayerDto,
   UpdateWeightsDto,
 } from './admin.dto';
@@ -26,6 +29,7 @@ export class AdminService {
     private readonly sb: SupabaseService,
     private readonly jwt: JwtService,
     private readonly wheels: WheelService,
+    private readonly scope: AdminScopeService,
   ) {}
 
   // ---------- auth ----------
@@ -33,20 +37,87 @@ export class AdminService {
     const admin = must(
       await this.sb.db
         .from('ld_admins')
-        .select('id, username, password_hash, role')
+        .select('id, username, password_hash, role, is_active, club:ld_clubs(code, name)')
         .eq('username', dto.username.trim())
         .maybeSingle(),
-    ) as { id: string; username: string; password_hash: string; role: string } | null;
+    ) as unknown as (AdminRow & { password_hash: string }) | null;
 
     if (!admin || !(await bcrypt.compare(dto.password, admin.password_hash))) {
       throw new AppError(401, 'INVALID_CREDENTIALS');
     }
+    if (!admin.is_active) throw new AppError(403, 'ADMIN_DISABLED');
     const accessToken = await this.jwt.signAsync({
       sub: admin.id,
       role: 'admin',
       username: admin.username,
     });
-    return { accessToken, admin: { id: admin.id, username: admin.username, role: admin.role } };
+    return { accessToken, admin: { id: admin.id, username: admin.username, role: admin.role, club: toClub(admin.club) } };
+  }
+
+  // ---------- admin accounts: the controller lets only a Super Admin in ----------
+  async listAdmins() {
+    const rows = must(
+      await this.sb.db
+        .from('ld_admins')
+        .select('id, username, role, is_active, created_at, club:ld_clubs(code, name)')
+        .order('username'),
+    ) as unknown as AdminRow[];
+    return rows.map(toAdmin);
+  }
+
+  async createAdmin(dto: CreateAdminDto) {
+    const clubId = await this.clubForRole(dto.role, dto.clubCode);
+    const password = generatePassword(12);
+    const { data, error } = await this.sb.db
+      .from('ld_admins')
+      .insert({ username: dto.username, password_hash: await bcrypt.hash(password, 10), role: dto.role, club_id: clubId })
+      .select('id, username, role, is_active, created_at, club:ld_clubs(code, name)')
+      .single();
+    if (error?.code === '23505') throw new AppError(409, 'ADMIN_ALREADY_EXISTS');
+    if (error) throw error;
+    return { ...toAdmin(data as unknown as AdminRow), initialPassword: password };
+  }
+
+  async updateAdmin(actorId: string, id: string, dto: UpdateAdminDto) {
+    const current = must(
+      await this.sb.db.from('ld_admins').select('role, club:ld_clubs(code)').eq('id', id).maybeSingle(),
+    ) as unknown as { role: string; club: { code: string } | null } | null;
+    if (!current) throw new AppError(404, 'ADMIN_NOT_FOUND');
+    // Nobody can lock themselves out, so there is always one Super Admin left.
+    if (id === actorId && (dto.role === 'STAFF' || dto.isActive === false)) throw new AppError(400, 'ADMIN_CANNOT_CHANGE_SELF');
+
+    const role = dto.role ?? current.role;
+    const patch: Record<string, unknown> = { role, club_id: await this.clubForRole(role, dto.clubCode ?? current.club?.code) };
+    if (dto.isActive !== undefined) patch.is_active = dto.isActive;
+    const row = must(
+      await this.sb.db
+        .from('ld_admins')
+        .update(patch)
+        .eq('id', id)
+        .select('id, username, role, is_active, created_at, club:ld_clubs(code, name)')
+        .single(),
+    ) as unknown as AdminRow;
+    return toAdmin(row);
+  }
+
+  async resetAdminPassword(id: string) {
+    const password = generatePassword(12);
+    const rows = must(
+      await this.sb.db.from('ld_admins').update({ password_hash: await bcrypt.hash(password, 10) }).eq('id', id).select('username'),
+    ) as { username: string }[];
+    if (!rows.length) throw new AppError(404, 'ADMIN_NOT_FOUND');
+    return { id, username: rows[0].username, newPassword: password };
+  }
+
+  /** An Admin must have a club. A Super Admin has none. */
+  private async clubForRole(role: string, clubCode?: string | null) {
+    if (role === 'SUPER') return null;
+    if (!clubCode) throw new AppError(400, 'CLUB_REQUIRED');
+    const club = must(
+      await this.sb.db.from('ld_clubs').select('id').eq('code', clubCode.trim().toLowerCase()).eq('is_active', true).maybeSingle(),
+    ) as { id: string } | null;
+    if (!club) throw new AppError(400, 'CLUB_NOT_FOUND', { club: clubCode });
+    return club.id;
   }
 
   // ---------- players ----------
@@ -55,6 +126,8 @@ export class AdminService {
       throw new AppError(400, 'HANDS_BELOW_REQUIREMENT', { minHands: MIN_HANDS });
     }
     const club = await this.findClub(dto.clubName);
+    const scope = await this.scope.of(adminId);
+    if (scope.clubId && club.id !== scope.clubId) throw new AppError(403, 'CLUB_NOT_ALLOWED');
     const xpokerId = dto.xpokerPlayerId.trim();
     // username = prefix ของ club + X-Poker ID เช่น cb45678
     const username = `${club.username_prefix}${xpokerId}`.toLowerCase();
@@ -87,14 +160,11 @@ export class AdminService {
   }
 
   // ---------- clubs ----------
-  async listClubs() {
-    const rows = must(
-      await this.sb.db
-        .from('ld_clubs')
-        .select('code, name, username_prefix, xpoker_club_id')
-        .eq('is_active', true)
-        .order('code'),
-    ) as { code: string; name: string; username_prefix: string; xpoker_club_id: string | null }[];
+  async listClubs(adminId: string) {
+    const scope = await this.scope.of(adminId);
+    let query = this.sb.db.from('ld_clubs').select('code, name, username_prefix, xpoker_club_id').eq('is_active', true);
+    if (scope.clubCode) query = query.eq('code', scope.clubCode);
+    const rows = must(await query.order('code')) as { code: string; name: string; username_prefix: string; xpoker_club_id: string | null }[];
     return rows.map((c) => ({
       code: c.code.toUpperCase(),
       name: c.name,
@@ -130,12 +200,15 @@ export class AdminService {
   }
 
 
-  async listPlayers(q: ListPlayersQuery) {
+  async listPlayers(adminId: string, q: ListPlayersQuery) {
+    const scope = await this.scope.of(adminId);
     let query = this.sb.db.from('ld_admin_players').select('*', { count: 'exact' });
     if (q.spinStatus) query = query.eq('spin_status', q.spinStatus);
     if (q.prizeCode) query = query.eq('prize_code', q.prizeCode);
     if (q.fulfillment) query = query.eq('fulfillment_status', q.fulfillment);
-    if (q.club) query = query.eq('club_code', q.club.trim().toLowerCase());
+    // An Admin always gets their own club, whatever the filter asks for.
+    const club = scope.clubCode ?? q.club?.trim().toLowerCase();
+    if (club) query = query.eq('club_code', club);
     if (q.q) {
       const term = q.q.replace(/[,()%*\\]/g, ' ').trim();
       if (term) {
@@ -158,23 +231,23 @@ export class AdminService {
     };
   }
 
-  async getPlayer(id: string) {
-    return toAdminPlayer(await this.playerRow(id));
+  async getPlayer(adminId: string, id: string) {
+    return toAdminPlayer(await this.playerRow(adminId, id));
   }
 
-  async updatePlayer(id: string, dto: UpdatePlayerDto) {
-    await this.playerRow(id);
+  async updatePlayer(adminId: string, id: string, dto: UpdatePlayerDto) {
+    await this.playerRow(adminId, id);
     const patch: Record<string, unknown> = {};
     if (dto.displayName !== undefined) patch.display_name = dto.displayName.trim();
     if (dto.isActive !== undefined) patch.is_active = dto.isActive;
     if (Object.keys(patch).length) {
       must(await this.sb.db.from('ld_players').update(patch).eq('id', id).select('id'));
     }
-    return this.getPlayer(id);
+    return this.getPlayer(adminId, id);
   }
 
-  async resetPassword(id: string) {
-    const row = await this.playerRow(id);
+  async resetPassword(adminId: string, id: string) {
+    const row = await this.playerRow(adminId, id);
     const password = generatePassword();
     must(
       await this.sb.db
@@ -186,11 +259,13 @@ export class AdminService {
     return { id, username: row.username, newPassword: password };
   }
 
-  private async playerRow(id: string) {
+  private async playerRow(adminId: string, id: string) {
+    const scope = await this.scope.of(adminId);
     const row = must(
       await this.sb.db.from('ld_admin_players').select('*').eq('id', id).maybeSingle(),
     ) as PlayerRow | null;
-    if (!row) throw new AppError(404, 'PLAYER_NOT_FOUND');
+    // To an Admin, another club's player does not exist.
+    if (!row || (scope.clubCode && row.club_code !== scope.clubCode)) throw new AppError(404, 'PLAYER_NOT_FOUND');
     return row;
   }
 
@@ -200,6 +275,7 @@ export class AdminService {
       await this.sb.db.from('ld_spins').select('id, player_id, status').eq('id', spinId).maybeSingle(),
     ) as { id: string; player_id: string; status: string } | null;
     if (!spin) throw new AppError(404, 'SPIN_NOT_FOUND');
+    await this.playerRow(adminId, spin.player_id);
     if (spin.status === 'CASH_PENDING') throw new AppError(400, 'CASH_NOT_REVEALED');
 
     const delivered = dto.status === 'DELIVERED';
@@ -211,7 +287,7 @@ export class AdminService {
     if (dto.note !== undefined) patch.note = dto.note;
 
     must(await this.sb.db.from('ld_spins').update(patch).eq('id', spinId).select('id'));
-    return this.getPlayer(spin.player_id);
+    return this.getPlayer(adminId, spin.player_id);
   }
 
   // ---------- prizes / summary / export ----------
@@ -240,10 +316,7 @@ export class AdminService {
   // ---------- weights ----------
   /** ปรับอัตรา (SUPER เท่านั้น) — ส่งวงล้อเดียวหรือทั้งสองก็ได้ */
   async updateWeights(adminId: string, dto: UpdateWeightsDto) {
-    const admin = must(
-      await this.sb.db.from('ld_admins').select('role').eq('id', adminId).maybeSingle(),
-    ) as { role: string } | null;
-    if (admin?.role !== 'SUPER') throw new AppError(403, 'SUPER_ADMIN_ONLY');
+    await this.scope.requireSuper(adminId);
 
     if (!dto.mainWheel && !dto.cashWheel) throw new AppError(400, 'WEIGHTS_EMPTY');
     const p_main = dto.mainWheel ? toBasisPoints(dto.mainWheel, 'mainWheel') : null;
@@ -291,8 +364,9 @@ export class AdminService {
     return data as Weights;
   }
 
-  async summary() {
-    const rows = await this.allRows();
+  async summary(adminId: string) {
+    const scope = await this.scope.of(adminId);
+    const rows = await this.allRows(scope.clubCode);
     const prizes = must(
       await this.sb.db.from('ld_prizes').select('qty_total, qty_remaining').eq('is_active', true),
     ) as { qty_total: number; qty_remaining: number }[];
@@ -311,7 +385,8 @@ export class AdminService {
         cashPending: count((r) => r.spin_status === 'CASH_PENDING'),
         done: count((r) => r.spin_status === 'DONE'),
       },
-      prizes: { total: totalQty, given: totalQty - remainingQty, remaining: remainingQty },
+      // Prize stock belongs to the whole event, so a club Admin does not get it.
+      ...(scope.isSuper ? { prizes: { total: totalQty, given: totalQty - remainingQty, remaining: remainingQty } } : {}),
       cashPaidLak: cashSum((r) => r.fulfillment_status === 'DELIVERED'),
       cashPendingLak: cashSum((r) => r.fulfillment_status === 'PENDING'),
       fulfillment: {
@@ -323,8 +398,9 @@ export class AdminService {
   }
 
 
-  async exportCsv() {
-    const rows = (await this.allRows()).filter((r) => r.spin_status !== 'NOT_SPUN');
+  async exportCsv(adminId: string) {
+    const scope = await this.scope.of(adminId);
+    const rows = (await this.allRows(scope.clubCode)).filter((r) => r.spin_status !== 'NOT_SPUN');
     const header = [
       'club_name', 'username', 'display_name', 'xpoker_player_id', 'hands_count', 'spin_status',
       'main_segment', 'prize_code', 'prize_name', 'prize_value_lak', 'spun_at', 'cash_spun_at',
@@ -335,11 +411,29 @@ export class AdminService {
     return '\uFEFF' + [header.join(','), ...lines].join('\r\n');
   }
 
-  private allRows() {
-    return fetchAll<PlayerRow>((from, to) =>
-      this.sb.db.from('ld_admin_players').select('*').order('created_at').range(from, to),
-    );
+  private allRows(clubCode: string | null = null) {
+    return fetchAll<PlayerRow>((from, to) => {
+      const query = this.sb.db.from('ld_admin_players').select('*');
+      return (clubCode ? query.eq('club_code', clubCode) : query).order('created_at').range(from, to);
+    });
   }
+}
+
+interface AdminRow {
+  id: string;
+  username: string;
+  role: string;
+  is_active: boolean;
+  created_at: string;
+  club: { code: string; name: string } | null;
+}
+
+function toClub(club: AdminRow['club']) {
+  return club ? { code: club.code.toUpperCase(), name: club.name } : null;
+}
+
+function toAdmin(r: AdminRow) {
+  return { id: r.id, username: r.username, role: r.role, isActive: r.is_active, createdAt: r.created_at, club: toClub(r.club) };
 }
 
 function toAdminPlayer(r: PlayerRow) {

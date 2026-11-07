@@ -16,17 +16,23 @@ import { Throttle } from '@nestjs/throttler';
 import { AdminGuard, CurrentUser, JwtPayload } from '../common/auth.guards';
 import { LoginDto } from '../player/login.dto';
 import {
+  CreateAdminDto,
   CreatePlayerDto,
   FulfillmentDto,
   ListPlayersQuery,
+  UpdateAdminDto,
   UpdatePlayerDto,
   UpdateWeightsDto,
 } from './admin.dto';
+import { AdminScopeService } from './admin-scope.service';
 import { AdminService } from './admin.service';
 
 @Controller('admin')
 export class AdminController {
-  constructor(private readonly admin: AdminService) {}
+  constructor(
+    private readonly admin: AdminService,
+    private readonly scope: AdminScopeService,
+  ) {}
 
   @Throttle({ default: { limit: 5, ttl: 15 * 60_000 } })
   @Post('auth/login')
@@ -37,8 +43,8 @@ export class AdminController {
 
   @UseGuards(AdminGuard)
   @Get('clubs')
-  clubs() {
-    return this.admin.listClubs();
+  clubs(@CurrentUser() user: JwtPayload) {
+    return this.admin.listClubs(user.sub);
   }
 
   @UseGuards(AdminGuard)
@@ -49,27 +55,27 @@ export class AdminController {
 
   @UseGuards(AdminGuard)
   @Get('players')
-  listPlayers(@Query() q: ListPlayersQuery) {
-    return this.admin.listPlayers(q);
+  listPlayers(@CurrentUser() user: JwtPayload, @Query() q: ListPlayersQuery) {
+    return this.admin.listPlayers(user.sub, q);
   }
 
   @UseGuards(AdminGuard)
   @Get('players/:id')
-  getPlayer(@Param('id', ParseUUIDPipe) id: string) {
-    return this.admin.getPlayer(id);
+  getPlayer(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
+    return this.admin.getPlayer(user.sub, id);
   }
 
   @UseGuards(AdminGuard)
   @Patch('players/:id')
-  updatePlayer(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdatePlayerDto) {
-    return this.admin.updatePlayer(id, dto);
+  updatePlayer(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdatePlayerDto) {
+    return this.admin.updatePlayer(user.sub, id, dto);
   }
 
   @UseGuards(AdminGuard)
   @Post('players/:id/reset-password')
   @HttpCode(200)
-  resetPassword(@Param('id', ParseUUIDPipe) id: string) {
-    return this.admin.resetPassword(id);
+  resetPassword(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
+    return this.admin.resetPassword(user.sub, id);
   }
 
   @UseGuards(AdminGuard)
@@ -84,7 +90,8 @@ export class AdminController {
 
   @UseGuards(AdminGuard)
   @Get('prizes')
-  prizes() {
+  async prizes(@CurrentUser() user: JwtPayload) {
+    await this.scope.requireSuper(user.sub);
     return this.admin.prizes();
   }
 
@@ -96,21 +103,52 @@ export class AdminController {
 
   @UseGuards(AdminGuard)
   @Get('prizes/weights/history')
-  weightHistory() {
+  async weightHistory(@CurrentUser() user: JwtPayload) {
+    await this.scope.requireSuper(user.sub);
     return this.admin.weightHistory();
   }
 
   @UseGuards(AdminGuard)
   @Get('summary')
-  summary() {
-    return this.admin.summary();
+  summary(@CurrentUser() user: JwtPayload) {
+    return this.admin.summary(user.sub);
   }
 
   @UseGuards(AdminGuard)
   @Get('spins/export')
   @Header('Content-Type', 'text/csv; charset=utf-8')
   @Header('Content-Disposition', 'attachment; filename="lucky-draw-winners.csv"')
-  exportCsv() {
-    return this.admin.exportCsv();
+  exportCsv(@CurrentUser() user: JwtPayload) {
+    return this.admin.exportCsv(user.sub);
+  }
+
+  // ---------- admin accounts: Super Admin only ----------
+  @UseGuards(AdminGuard)
+  @Get('admins')
+  async admins(@CurrentUser() user: JwtPayload) {
+    await this.scope.requireSuper(user.sub);
+    return this.admin.listAdmins();
+  }
+
+  @UseGuards(AdminGuard)
+  @Post('admins')
+  async createAdmin(@CurrentUser() user: JwtPayload, @Body() dto: CreateAdminDto) {
+    await this.scope.requireSuper(user.sub);
+    return this.admin.createAdmin(dto);
+  }
+
+  @UseGuards(AdminGuard)
+  @Patch('admins/:id')
+  async updateAdmin(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateAdminDto) {
+    await this.scope.requireSuper(user.sub);
+    return this.admin.updateAdmin(user.sub, id, dto);
+  }
+
+  @UseGuards(AdminGuard)
+  @Post('admins/:id/reset-password')
+  @HttpCode(200)
+  async resetAdminPassword(@CurrentUser() user: JwtPayload, @Param('id', ParseUUIDPipe) id: string) {
+    await this.scope.requireSuper(user.sub);
+    return this.admin.resetAdminPassword(id);
   }
 }

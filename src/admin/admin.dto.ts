@@ -13,6 +13,36 @@ import {
   MinLength,
 } from 'class-validator';
 
+export class CreateAdminDto {
+  @IsString()
+  @Matches(/^[a-z0-9._-]{3,32}$/, { message: 'username must be 3-32 lower-case letters, digits, dot, _ or -' })
+  username: string;
+
+  @IsIn(['SUPER', 'STAFF'])
+  role: 'SUPER' | 'STAFF';
+
+  /** Required for STAFF, ignored for SUPER. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  clubCode?: string;
+}
+
+export class UpdateAdminDto {
+  @IsOptional()
+  @IsIn(['SUPER', 'STAFF'])
+  role?: 'SUPER' | 'STAFF';
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  clubCode?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+}
+
 export class CreatePlayerDto {
   /** X-Poker player ID — ใช้ต่อท้าย prefix ของ club เป็น username */
   @IsString()
