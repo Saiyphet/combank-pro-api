@@ -8,6 +8,9 @@ import { WheelService } from './wheel.service';
 import { ThatLuangPlayerService } from '../thatluang/thatluang-player.service';
 import { LoginDto } from './login.dto';
 
+/** สิทธิ์ Halloween: 1,666 hands = 1 กล่อง (account สร้างได้โดยไม่ต้องถึง) */
+export const HALLOWEEN_MIN_HANDS = 1666;
+
 @Injectable()
 export class PlayerService {
   constructor(
@@ -31,11 +34,28 @@ export class PlayerService {
     }
     if (!user.is_active) throw new AppError(403, 'PLAYER_DISABLED');
 
-    const accessToken = await this.jwt.signAsync({ sub: user.id, role: 'player' });
-    return { accessToken, player: await this.me(user.id) };
+    // login แยกต่อโปร: token ผูกกับโปรที่ login เข้า
+    const halloween = process.env.HALLOWEEN_CAMPAIGN_CODE || 'halloween-2026';
+    const campaign = (dto.campaign ?? halloween).trim().toLowerCase();
+    const camp = must(
+      await this.sb.db.from('ld_campaigns').select('code, status').eq('code', campaign).maybeSingle(),
+    ) as { code: string; status: string } | null;
+    if (!camp && campaign !== halloween) throw new AppError(404, 'CAMPAIGN_NOT_FOUND');
+    if (camp?.status === 'COMING_SOON') throw new AppError(403, 'CAMPAIGN_NOT_OPEN');
+
+    const accessToken = await this.jwt.signAsync(
+      dto.campaign ? { sub: user.id, role: 'player', cmp: campaign } : { sub: user.id, role: 'player' },
+    );
+    const player = dto.campaign ? await this.profile(user.id) : await this.me(user.id);
+    return { accessToken, campaign, player };
   }
 
   async me(playerId: string) {
+    const profile = await this.profile(playerId);
+    return { ...profile, ...(await this.thatLuang.progress(playerId)) };
+  }
+
+  private async profile(playerId: string) {
     const row = must(
       await this.sb.db.from('ld_admin_players').select('*').eq('id', playerId).maybeSingle(),
     ) as PlayerRow | null;
@@ -48,9 +68,9 @@ export class PlayerService {
       xpokerPlayerId: row.xpoker_player_id,
       club: { code: row.club_code.toUpperCase(), name: row.club_name },
       handsCount: row.hands_count,
+      halloweenEligible: row.hands_count >= HALLOWEEN_MIN_HANDS,
       spinStatus: row.spin_status,
       spin: mapRowSpin(row),
-      ...(await this.thatLuang.progress(row.id)),
     };
   }
 
@@ -65,6 +85,12 @@ export class PlayerService {
     );
     if (thatLuangOnly) throw new AppError(403, 'CAMPAIGN_CLOSED');
 
+    const p = must(
+      await this.sb.db.from('ld_players').select('hands_count').eq('id', playerId).maybeSingle(),
+    ) as { hands_count: number } | null;
+    if (p && p.hands_count < HALLOWEEN_MIN_HANDS) {
+      throw new AppError(403, 'NOT_ELIGIBLE', { minHands: HALLOWEEN_MIN_HANDS });
+    }
     const { data, error } = await this.sb.db.rpc('ld_spin', { p_player_id: playerId });
     if (error) throwRpcError(error);
     const r = data as RpcSpinResult;
