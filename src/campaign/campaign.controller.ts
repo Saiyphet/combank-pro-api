@@ -18,6 +18,7 @@ import {
     AdjustSpinsDto,
     ListCampaignPlayersQuery,
     ListCampaignSpinsQuery,
+    MySpinsQuery,
     SetHandsDto,
     ToggleActiveDto,
     UpdateCampaignDto,
@@ -49,6 +50,13 @@ export class CampaignController {
     @Get(':code/me')
     me(@CurrentUser() user: JwtPayload, @Param(CODE) code: string) {
         return this.campaigns.myStatus(user.sub, code);
+    }
+
+    /** ประวัติรางวัลของตัวเอง (เห็นเฉพาะของตัวเอง — ระบุตัวจาก token) ?wheel=&page=&limit= */
+    @UseGuards(PlayerGuard, CampaignTokenGuard)
+    @Get(':code/me/spins')
+    mySpins(@CurrentUser() user: JwtPayload, @Param(CODE) code: string, @Query() q: MySpinsQuery) {
+        return this.campaigns.mySpins(user.sub, code, q);
     }
 
     @UseGuards(PlayerGuard, CampaignTokenGuard)

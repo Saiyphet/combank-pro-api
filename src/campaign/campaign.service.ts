@@ -7,6 +7,7 @@ import {
     AdjustSpinsDto,
     ListCampaignPlayersQuery,
     ListCampaignSpinsQuery,
+    MySpinsQuery,
     SetHandsDto,
     UpdateCampaignDto,
 } from './campaign.dto';
@@ -120,6 +121,7 @@ export class CampaignService {
     async publicInfo(code: string) {
         const camp = await this.campaign(code);
         const [wheels, odds] = await Promise.all([this.wheels(camp.id), this.odds(camp.code)]);
+        const spinCounts = await this.spinCounts(wheels.map((w) => w.id));
         return {
             ...card(camp),
             wheels: wheels.map((w) => {
@@ -130,6 +132,9 @@ export class CampaignService {
                     vipDays: w.vip_days,
                     isOpen: w.is_active,
                     stakes: w.stakes.map((s) => ({ stake: s.code, handsPerSpin: s.hands_per_spin })),
+                    /** วงนี้ถูกหมุนไปแล้วกี่รอบ (ผู้เล่นทุกคนรวมกัน) */
+                    totalSpins: spinCounts.get(w.id) ?? 0,
+                    totalPrizes: prizes.reduce((a, p) => a + p.qty_total, 0),
                     totalRemaining: prizes.reduce((a, p) => a + p.qty_remaining, 0),
                     segments: prizes.map((p, i) => ({
                         slot: i + 1,
@@ -138,12 +143,65 @@ export class CampaignService {
                         name: p.name,
                         valueLak: p.value_lak,
                         imageUrl: p.image_url,
+                        vipDays: w.vip_days,
                         qtyTotal: p.qty_total,
+                        /** รางวัลนี้ออกไปแล้วกี่ครั้ง */
+                        qtyGiven: p.qty_total - p.qty_remaining,
                         qtyRemaining: p.qty_remaining,
                         oddsPct: Number(p.odds_pct ?? 0),
                     })),
                 };
             }),
+        };
+    }
+
+    /** ประวัติรางวัลของผู้เล่นคนนี้เท่านั้น (จาก token) — แบ่งหน้า + กรองวงได้ */
+    async mySpins(playerId: string, code: string, q: MySpinsQuery) {
+        const camp = await this.campaign(code);
+        let query = this.sb.db
+            .from('ld_wheel_spin_list')
+            .select('spin_id, wheel_code, wheel_name, prize_code, prize_type, prize_name, prize_value_lak, vip_days, spun_at, fulfillment_status, delivered_at', { count: 'exact' })
+            .eq('campaign_code', camp.code)
+            .eq('player_id', playerId);
+        if (q.wheel) query = query.eq('wheel_code', q.wheel.trim().toLowerCase());
+        const from = (q.page - 1) * q.limit;
+        const { data, error, count } = await query
+            .order('spun_at', { ascending: false })
+            .range(from, from + q.limit - 1);
+        if (error) throw error;
+
+        const rows = (data ?? []) as SpinListRow[];
+        // สรุปของผู้เล่นคนนี้: หมุนไปกี่ครั้ง / ได้เงินรวม / VIP รวม (ทุกหน้า)
+        const all = must(
+            await this.sb.db
+                .from('ld_wheel_spin_list')
+                .select('wheel_code, prize_type, prize_value_lak, vip_days, fulfillment_status')
+                .eq('campaign_code', camp.code)
+                .eq('player_id', playerId),
+        ) as SpinListRow[];
+        const valid = all.filter((s) => s.fulfillment_status !== 'CANCELLED');
+
+        return {
+            campaign: camp.code,
+            summary: {
+                totalSpins: all.length,
+                byWheel: all.reduce<Record<string, number>>((m, s) => ((m[s.wheel_code] = (m[s.wheel_code] ?? 0) + 1), m), {}),
+                totalCashLak: valid.filter((s) => s.prize_type === 'CASH').reduce((a, s) => a + Number(s.prize_value_lak ?? 0), 0),
+                totalVipDays: valid.reduce((a, s) => a + s.vip_days, 0),
+            },
+            total: count ?? 0,
+            page: q.page,
+            limit: q.limit,
+            items: rows.map((r) => ({
+                spinId: r.spin_id,
+                wheel: r.wheel_code,
+                wheelName: r.wheel_name,
+                spunAt: r.spun_at,
+                prize: { code: r.prize_code, type: r.prize_type, name: r.prize_name, valueLak: r.prize_value_lak },
+                vipDays: r.vip_days,
+                fulfillmentStatus: r.fulfillment_status,
+                deliveredAt: r.delivered_at,
+            })),
         };
     }
 
@@ -631,6 +689,22 @@ export class CampaignService {
         const w = (await this.wheels(camp.id)).find((x) => x.code === wheelCode.trim().toLowerCase());
         if (!w) throw new AppError(404, 'WHEEL_NOT_FOUND');
         return w;
+    }
+
+    /** จำนวนครั้งที่หมุนแล้วต่อวง (ทุกผู้เล่น) */
+    private async spinCounts(wheelIds: string[]) {
+        const out = new Map<string, number>();
+        await Promise.all(
+            wheelIds.map(async (id) => {
+                const { count, error } = await this.sb.db
+                    .from('ld_wheel_spins')
+                    .select('id', { count: 'exact', head: true })
+                    .eq('wheel_id', id);
+                if (error) throw error;
+                out.set(id, count ?? 0);
+            }),
+        );
+        return out;
     }
 
     private async odds(campaignCode: string) {

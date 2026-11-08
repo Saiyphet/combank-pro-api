@@ -10,7 +10,8 @@ export class PlayerController {
   constructor(private readonly players: PlayerService) { }
 
   /** 5 ครั้ง / 15 นาที / IP */
-  @Throttle({ default: { limit: 5, ttl: 15 * 60_000 } })
+  // login แยกต่อโปร = ผู้เล่น 1 คน login หลายครั้ง + หลายคนอาจใช้ IP เดียวกัน (WiFi คลับ / เน็ตมือถือ) → 10 ครั้ง/15 นาที/IP
+  @Throttle({ default: { limit: 10, ttl: 15 * 60_000 } })
   @Post('auth/login')
   @HttpCode(200)
   login(@Body() dto: LoginDto) {

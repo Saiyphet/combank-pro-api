@@ -151,6 +151,14 @@ export class ListCampaignPlayersQuery extends PageQuery {
     hasSpins?: 'YES' | 'NO';
 }
 
+/** ประวัติรางวัลของผู้เล่นเอง */
+export class MySpinsQuery extends PageQuery {
+    @IsOptional()
+    @IsString()
+    @MaxLength(32)
+    wheel?: string;
+}
+
 export class ListCampaignSpinsQuery extends PageQuery {
     @IsOptional()
     @IsString()
