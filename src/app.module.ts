@@ -7,6 +7,7 @@ import { SupabaseModule } from './supabase/supabase.module';
 import { PlayerModule } from './player/player.module';
 import { AdminModule } from './admin/admin.module';
 import { HealthController } from './health.controller';
+import { CampaignModule } from './campaign/campaign.module';
 
 @Module({
   imports: [
@@ -24,11 +25,12 @@ import { HealthController } from './health.controller';
     SupabaseModule,
     PlayerModule,
     AdminModule,
+    CampaignModule
   ],
   controllers: [HealthController],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
-export class AppModule {}
+export class AppModule { }
 
 /** JWT_SECRET สั้น = เดาได้ = ปลอม token admin ได้ */
 function strongSecret(secret: string) {

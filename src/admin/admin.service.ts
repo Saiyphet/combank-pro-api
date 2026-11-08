@@ -16,6 +16,7 @@ import {
   UpdateWeightsDto,
 } from './admin.dto';
 
+/** สิทธิ์ Halloween (ไม่ใช่เงื่อนไขสร้าง account แล้ว) */
 const MIN_HANDS = 1666;
 // ไม่มีตัวที่สับสนกันง่าย (0/O, 1/l/I)
 const PW_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
@@ -26,7 +27,7 @@ export class AdminService {
     private readonly sb: SupabaseService,
     private readonly jwt: JwtService,
     private readonly wheels: WheelService,
-  ) {}
+  ) { }
 
   // ---------- auth ----------
   async login(dto: LoginDto) {
@@ -51,13 +52,14 @@ export class AdminService {
 
   // ---------- players ----------
   async createPlayer(adminId: string, dto: CreatePlayerDto) {
-    if (dto.handsCount < MIN_HANDS) {
-      throw new AppError(400, 'HANDS_BELOW_REQUIREMENT', { minHands: MIN_HANDS });
-    }
     const club = await this.findClub(dto.clubName);
     const xpokerId = dto.xpokerPlayerId.trim();
     // username = prefix ของ club + X-Poker ID เช่น cb45678
     const username = `${club.username_prefix}${xpokerId}`.toLowerCase();
+
+    // 1 X-Poker ID = 1 account ทั้งระบบ — บอกว่ามีอยู่แล้วใน club ไหน
+    const existing = await this.findByXpokerId(xpokerId);
+    if (existing) throw new AppError(409, 'PLAYER_ALREADY_EXISTS', existing);
 
     const password = generatePassword();
     const { data, error } = await this.sb.db
@@ -67,7 +69,7 @@ export class AdminService {
         password_hash: await bcrypt.hash(password, 10),
         display_name: dto.displayName.trim(),
         xpoker_player_id: xpokerId,
-        hands_count: dto.handsCount,
+        hands_count: dto.handsCount ?? 0,
         club_id: club.id,
         created_by: adminId,
       })
@@ -75,7 +77,9 @@ export class AdminService {
       .single();
 
     if (error?.code === '23505') {
-      throw new AppError(409, 'PLAYER_ALREADY_EXISTS', { username, club: club.code.toUpperCase() });
+      // สร้างพร้อมกัน 2 request → ฐานข้อมูลกันไว้อีกชั้น
+      const dup = await this.findByXpokerId(xpokerId);
+      throw new AppError(409, 'PLAYER_ALREADY_EXISTS', dup ?? { username });
     }
     if (error) throw error;
     return {
@@ -83,6 +87,24 @@ export class AdminService {
       username,
       initialPassword: password,
       club: { code: club.code.toUpperCase(), name: club.name },
+      halloweenEligible: (dto.handsCount ?? 0) >= MIN_HANDS,
+    };
+  }
+
+  private async findByXpokerId(xpokerId: string) {
+    const row = must(
+      await this.sb.db
+        .from('ld_admin_players')
+        .select('id, username, club_code, club_name')
+        .ilike('xpoker_player_id', xpokerId.replace(/[\\%_]/g, (c) => '\\' + c))
+        .limit(1)
+        .maybeSingle(),
+    ) as { id: string; username: string; club_code: string; club_name: string } | null;
+    if (!row) return null;
+    return {
+      playerId: row.id,
+      username: row.username,
+      club: { code: row.club_code.toUpperCase(), name: row.club_name },
     };
   }
 
@@ -307,7 +329,8 @@ export class AdminService {
       players: {
         total: rows.length,
         active: count((r) => r.is_active),
-        notSpun: count((r) => r.spin_status === 'NOT_SPUN'),
+        halloweenEligible: count((r) => r.hands_count >= MIN_HANDS),
+        notSpun: count((r) => r.spin_status === 'NOT_SPUN' && r.hands_count >= MIN_HANDS),
         cashPending: count((r) => r.spin_status === 'CASH_PENDING'),
         done: count((r) => r.spin_status === 'DONE'),
       },
@@ -349,6 +372,7 @@ function toAdminPlayer(r: PlayerRow) {
     displayName: r.display_name,
     xpokerPlayerId: r.xpoker_player_id,
     handsCount: r.hands_count,
+    halloweenEligible: r.hands_count >= MIN_HANDS,
     isActive: r.is_active,
     createdAt: r.created_at,
     createdBy: r.created_by,

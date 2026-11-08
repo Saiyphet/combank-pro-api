@@ -64,15 +64,14 @@ async function main() {
   const A = adminLogin.body.accessToken;
 
   const xpId = `TEST-${Date.now().toString().slice(-6)}`;
-  check(
-    'create player: hands < 1666',
-    await call('POST', '/admin/players', {
-      token: A,
-      body: { xpokerPlayerId: xpId, clubName: 'ComBank CLUB', displayName: 'Test low', handsCount: 1665 },
-    }),
-    400,
-    'HANDS_BELOW_REQUIREMENT',
-  );
+  // account สร้างได้โดยไม่ต้องมี 1,666 hands (ใช้กับบุนทาดหลวง) แต่ไม่มีสิทธิ์ Halloween
+  const low = await call('POST', '/admin/players', {
+    token: A,
+    body: { xpokerPlayerId: `${xpId}L`, clubName: 'ComBank CLUB', displayName: 'Test low', handsCount: 1665 },
+  });
+  if (check('create player: hands < 1666 (no Halloween spin)', low, 201) && low.body.halloweenEligible !== false) {
+    console.log('  ✗ expected halloweenEligible = false');
+  }
 
   const created = await call('POST', '/admin/players', {
     token: A,

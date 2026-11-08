@@ -32,10 +32,11 @@ export class CreatePlayerDto {
   @MaxLength(100)
   displayName: string;
 
-  /** ตรวจ >= 1666 ใน service เพื่อคืน HANDS_BELOW_REQUIREMENT */
+  /** hands ของ Halloween — ≥ 1666 = ได้ 1 กล่อง · ไม่ส่ง / น้อยกว่า = มี account แต่ไม่มีสิทธิ์ Halloween */
+  @IsOptional()
   @IsInt()
   @Min(0)
-  handsCount: number;
+  handsCount?: number;
 }
 
 export class UpdatePlayerDto {
