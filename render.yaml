@@ -7,17 +7,16 @@ services:
     name: lucky-draw-api
     runtime: node
     region: singapore          # ใกล้ลาวที่สุด
-    plan: free              # free จะ sleep หลังไม่มีคนใช้ 15 นาที (ตื่นช้า ~1 นาที) — ไม่เหมาะช่วงแคมเปญ
+    plan: free                 # free จะ sleep หลังไม่มีคนใช้ 15 นาที (ตื่นช้า ~1 นาที) — UptimeRobot ping /api/health กันไว้
     buildCommand: npm install --include=dev && npm run build
     startCommand: npm run start
     healthCheckPath: /api/health
-    
     autoDeploy: true
     envVars:
       - key: NODE_VERSION
         value: "22"
       - key: TRUST_PROXY
-        value: "1"
+        value: "2"             # Vercel → Render = proxy 2 ชั้น (rate limit ต่อ IP ผู้เล่นถูกคน)
       - key: JWT_EXPIRES_IN
         value: 12h
       - key: JWT_SECRET
@@ -27,8 +26,5 @@ services:
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: CORS_ORIGINS
-        sync: false            # URL ของ frontend เช่น https://lucky-draw-web.onrender.com
-      - key: CAMPAIGN_START
-        sync: false
-      - key: CAMPAIGN_END
-        sync: false
+        sync: false            # https://www.laosunion.com,https://laosunion.com
+      # เปิด/ปิดโปรด้วย status ในตาราง ld_campaigns (admin API) — ไม่ใช้ CAMPAIGN_START / CAMPAIGN_END แล้ว
