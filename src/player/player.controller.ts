@@ -2,6 +2,7 @@ import { Body, Controller, Get, HttpCode, Post, UseGuards } from '@nestjs/common
 import { Throttle } from '@nestjs/throttler';
 import { CampaignTokenGuard, CurrentUser, JwtPayload, PlayerGuard } from '../common/auth.guards';
 import { CampaignGuard } from '../common/campaign.guard';
+import { ChangePasswordDto } from '../admin/admin.dto';
 import { LoginDto } from './login.dto';
 import { PlayerService } from './player.service';
 
@@ -22,6 +23,15 @@ export class PlayerController {
   @Get('me')
   me(@CurrentUser() user: JwtPayload) {
     return this.players.me(user.sub);
+  }
+
+  /** ลูกค้าเปลี่ยนรหัสเอง (ใช้ token ของโปรไหนก็ได้) — หลังเปลี่ยน admin จะดูรหัสไม่ได้อีก */
+  @UseGuards(PlayerGuard)
+  @Throttle({ default: { limit: 5, ttl: 15 * 60_000 } })
+  @Post('me/password')
+  @HttpCode(200)
+  changePassword(@CurrentUser() user: JwtPayload, @Body() dto: ChangePasswordDto) {
+    return this.players.changePassword(user.sub, dto);
   }
 
   @Get('prizes')

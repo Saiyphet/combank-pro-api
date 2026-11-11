@@ -8,8 +8,11 @@ export interface PlayerRow {
   is_active: boolean;
   created_at: string;
   created_by: string;
-  club_code: string;
-  club_name: string;
+  club_code: string | null;
+  club_name: string | null;
+  club_id: string | null;
+  password_scope: 'CLUB' | 'SUPER' | null;
+  password_changed_at: string | null;
   spin_status: 'NOT_SPUN' | 'CASH_PENDING' | 'DONE';
   spin_id: string | null;
   main_segment: string | null;

@@ -116,6 +116,12 @@ export class UpdateCampaignDto {
     @Min(0)
     @Max(1000)
     sortOrder?: number;
+
+    /** ลิงก์ Google Sheet สำหรับ import hands ("" = ลบ) */
+    @IsOptional()
+    @IsString()
+    @MaxLength(500)
+    handsSheetUrl?: string;
 }
 
 class PageQuery {
@@ -145,10 +151,43 @@ export class ListCampaignPlayersQuery extends PageQuery {
     @MaxLength(32)
     club?: string;
 
+    /** YES = เฉพาะคนที่ร่วมแคมเปญแล้ว · NO = ยังไม่มี hands / สิทธิ์ */
+    @IsOptional()
+    @IsIn(['YES', 'NO'])
+    joined?: 'YES' | 'NO';
+
     /** YES = ยังมีสิทธิ์เหลือ (วงไหนก็ได้) · NO = ไม่เหลือสิทธิ์ */
     @IsOptional()
     @IsIn(['YES', 'NO'])
     hasSpins?: 'YES' | 'NO';
+}
+
+/** ผู้ได้รางวัลล่าสุด (โชว์บนหน้าเว็บ) */
+export class WinnersQuery {
+    @IsOptional()
+    @IsString()
+    @MaxLength(32)
+    wheel?: string;
+
+    /** เฉพาะรางวัลตั้งแต่ … กีบ ขึ้นไป (เช่น 1000000 = รางวัลใหญ่) */
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(0)
+    minValueLak?: number;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    page = 1;
+
+    @IsOptional()
+    @Type(() => Number)
+    @IsInt()
+    @Min(1)
+    @Max(50)
+    limit = 20;
 }
 
 /** ประวัติรางวัลของผู้เล่นเอง */

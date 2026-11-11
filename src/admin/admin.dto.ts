@@ -1,5 +1,7 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsIn,
   IsInt,
@@ -11,21 +13,77 @@ import {
   MaxLength,
   Min,
   MinLength,
+  NotEquals,
+  ValidateNested,
 } from 'class-validator';
 
+class CampaignHandsEntry {
+  @IsString()
+  @MaxLength(16)
+  stake: string;
+
+  @IsInt()
+  @Min(0)
+  @Max(10_000_000)
+  hands: number;
+}
+
+class CampaignSpinEntry {
+  @IsString()
+  @MaxLength(32)
+  wheel: string;
+
+  @IsInt()
+  @NotEquals(0)
+  @Min(1)
+  @Max(1000)
+  delta: number;
+
+  @IsString()
+  @MinLength(1)
+  @MaxLength(200)
+  reason: string;
+}
+
+/** ใส่ hands / สิทธิ์ของแคมเปญตอนสร้างผู้เล่น (SUPER เท่านั้น) */
+export class CreatePlayerCampaignDto {
+  @IsString()
+  @MaxLength(40)
+  code: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => CampaignHandsEntry)
+  hands?: CampaignHandsEntry[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @ValidateNested({ each: true })
+  @Type(() => CampaignSpinEntry)
+  spins?: CampaignSpinEntry[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  note?: string;
+}
+
 export class CreatePlayerDto {
-  /** X-Poker player ID — ใช้ต่อท้าย prefix ของ club เป็น username */
+  /** X-Poker player ID — ใช้เป็น username ด้วย (account ใหม่) */
   @IsString()
   @Matches(/^\s*[A-Za-z0-9_-]{1,32}\s*$/, {
     message: 'xpokerPlayerId must be 1-32 letters, digits, _ or -',
   })
   xpokerPlayerId: string;
 
-  /** ชื่อ club เต็ม ("ComBank CLUB"), ตัวย่อ ("CB") หรือ X-Poker club ID ("1216343") */
+  /** ไม่บังคับ: ชื่อ club เต็ม ("ComBank CLUB"), ตัวย่อ ("CB") หรือ X-Poker club ID — ไม่ส่ง = ยังไม่มี club */
+  @IsOptional()
   @IsString()
-  @MinLength(1)
   @MaxLength(64)
-  clubName: string;
+  clubName?: string;
 
   @IsString()
   @MinLength(1)
@@ -37,6 +95,12 @@ export class CreatePlayerDto {
   @IsInt()
   @Min(0)
   handsCount?: number;
+
+  /** SUPER: ใส่ hands / สิทธิ์แคมเปญพร้อมกันตอนสร้าง */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CreatePlayerCampaignDto)
+  campaign?: CreatePlayerCampaignDto;
 }
 
 export class UpdatePlayerDto {
@@ -49,6 +113,25 @@ export class UpdatePlayerDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  /** SUPER / STAFF: ใส่ / เปลี่ยน club (รหัส "CB", ชื่อเต็ม หรือ X-Poker club ID) · "" = เอา club ออก */
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  clubName?: string;
+}
+
+/** ลูกค้าเปลี่ยนรหัสเอง */
+export class ChangePasswordDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(128)
+  currentPassword: string;
+
+  @IsString()
+  @MinLength(8)
+  @MaxLength(72)
+  newPassword: string;
 }
 
 export class ListPlayersQuery {
@@ -65,6 +148,7 @@ export class ListPlayersQuery {
   @IsIn(['PENDING', 'DELIVERED', 'CANCELLED'])
   fulfillment?: 'PENDING' | 'DELIVERED' | 'CANCELLED';
 
+  /** รหัส club เช่น CB · "none" = ยังไม่มี club */
   @IsOptional()
   @IsString()
   @MaxLength(32)

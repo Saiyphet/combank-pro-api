@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
-import { randomInt } from 'crypto';
 import { SupabaseService } from '../supabase/supabase.service';
 import { fetchAll } from '../supabase/fetch-all';
 import { AppError, must, throwRpcError } from '../common/app-error';
+import { AdminActor } from '../common/auth.guards';
+import { generatePassword, passwordVault } from '../common/password-vault';
 import { PlayerRow, mapRowPrize } from '../common/mappers';
 import { LoginDto } from '../player/login.dto';
 import { WheelService } from '../player/wheel.service';
@@ -18,8 +19,6 @@ import {
 
 /** สิทธิ์ Halloween (ไม่ใช่เงื่อนไขสร้าง account แล้ว) */
 const MIN_HANDS = 1666;
-// ไม่มีตัวที่สับสนกันง่าย (0/O, 1/l/I)
-const PW_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
 
 @Injectable()
 export class AdminService {
@@ -34,34 +33,63 @@ export class AdminService {
     const admin = must(
       await this.sb.db
         .from('ld_admins')
-        .select('id, username, password_hash, role')
-        .eq('username', dto.username.trim())
+        .select('id, username, password_hash, role, is_active, club:ld_clubs(code, name)')
+        // ไม่สนตัวพิมพ์ (admin เก่าบางคนอาจสร้างด้วยตัวใหญ่)
+        .ilike('username', dto.username.trim().replace(/[\\%_]/g, (c) => '\\' + c))
+        .limit(1)
         .maybeSingle(),
-    ) as { id: string; username: string; password_hash: string; role: string } | null;
+    ) as unknown as {
+      id: string;
+      username: string;
+      password_hash: string;
+      role: string;
+      is_active: boolean;
+      club: { code: string; name: string } | null;
+    } | null;
 
     if (!admin || !(await bcrypt.compare(dto.password, admin.password_hash))) {
       throw new AppError(401, 'INVALID_CREDENTIALS');
     }
+    // บอกว่าถูกปิดหลังตรวจรหัสแล้วเท่านั้น (ไม่ให้เดาได้ว่ามี username นี้)
+    if (!admin.is_active) throw new AppError(403, 'ADMIN_DISABLED');
     const accessToken = await this.jwt.signAsync({
       sub: admin.id,
       role: 'admin',
       username: admin.username,
     });
-    return { accessToken, admin: { id: admin.id, username: admin.username, role: admin.role } };
+    return {
+      accessToken,
+      admin: {
+        id: admin.id,
+        username: admin.username,
+        role: admin.role,
+        club: admin.club ? { code: admin.club.code.toUpperCase(), name: admin.club.name } : null,
+      },
+    };
   }
 
   // ---------- players ----------
-  async createPlayer(adminId: string, dto: CreatePlayerDto) {
-    const club = await this.findClub(dto.clubName);
+  /**
+   * สร้างผู้เล่น (SUPER / STAFF — admin ประจำ club สร้างไม่ได้)
+   * username = X-Poker ID (account เก่าที่มี prefix club ใช้ต่อได้ตามเดิม)
+   * club ไม่บังคับ · รหัสที่สุ่มให้เก็บแบบเข้ารหัส ให้ SUPER / admin club นั้นเปิดดูได้
+   * campaign (SUPER): ใส่ hands / สิทธิ์ของแคมเปญพร้อมกัน — ถ้าส่วนนี้ผิด จะไม่สร้าง account
+   */
+  async createPlayer(actor: AdminActor, dto: CreatePlayerDto) {
+    const adminId = actor.id;
+    const club = dto.clubName?.trim() ? await this.findClub(dto.clubName) : null;
     const xpokerId = dto.xpokerPlayerId.trim();
-    // username = prefix ของ club + X-Poker ID เช่น cb45678
-    const username = `${club.username_prefix}${xpokerId}`.toLowerCase();
+    const username = xpokerId.toLowerCase();
 
-    // 1 X-Poker ID = 1 account ทั้งระบบ — บอกว่ามีอยู่แล้วใน club ไหน
+    // ตรวจส่วนแคมเปญก่อนสร้าง (โต๊ะ / วงต้องมีจริง)
+    const camp = dto.campaign ? await this.validateCampaignPart(actor, dto.campaign) : null;
+
+    // 1 X-Poker ID = 1 account ทั้งระบบ
     const existing = await this.findByXpokerId(xpokerId);
     if (existing) throw new AppError(409, 'PLAYER_ALREADY_EXISTS', existing);
 
     const password = generatePassword();
+    const enc = passwordVault.encrypt(password);
     const { data, error } = await this.sb.db
       .from('ld_players')
       .insert({
@@ -70,25 +98,96 @@ export class AdminService {
         display_name: dto.displayName.trim(),
         xpoker_player_id: xpokerId,
         hands_count: dto.handsCount ?? 0,
-        club_id: club.id,
+        club_id: club?.id ?? null,
         created_by: adminId,
+        password_enc: enc,
+        password_scope: enc ? 'CLUB' : null,
       })
       .select('id')
       .single();
 
     if (error?.code === '23505') {
-      // สร้างพร้อมกัน 2 request → ฐานข้อมูลกันไว้อีกชั้น
+      // สร้างพร้อมกัน 2 request / username ชนกับ account เก่า → ฐานข้อมูลกันไว้อีกชั้น
       const dup = await this.findByXpokerId(xpokerId);
       throw new AppError(409, 'PLAYER_ALREADY_EXISTS', dup ?? { username });
     }
     if (error) throw error;
+
+    let campaign: Record<string, unknown> | null = null;
+    if (camp) {
+      try {
+        campaign = await this.applyCampaignPart(adminId, data.id, camp);
+      } catch (e) {
+        await this.deletePlayerHard(data.id); // ไม่ให้เหลือ account ครึ่ง ๆ
+        throw e;
+      }
+    }
+
     return {
       id: data.id,
       username,
       initialPassword: password,
-      club: { code: club.code.toUpperCase(), name: club.name },
+      club: club ? { code: club.code.toUpperCase(), name: club.name } : null,
       halloweenEligible: (dto.handsCount ?? 0) >= MIN_HANDS,
+      ...(campaign ? { campaign } : {}),
     };
+  }
+
+  private async validateCampaignPart(actor: AdminActor, c: NonNullable<CreatePlayerDto['campaign']>) {
+    if (actor.role !== 'SUPER') throw new AppError(403, 'SUPER_ADMIN_ONLY', { field: 'campaign' });
+    const camp = must(
+      await this.sb.db
+        .from('ld_campaigns')
+        .select('id, code, wheels:ld_wheels(code, stakes:ld_wheel_stakes(code))')
+        .eq('code', c.code.trim().toLowerCase())
+        .maybeSingle(),
+    ) as { id: string; code: string; wheels: { code: string; stakes: { code: string }[] }[] } | null;
+    if (!camp || !camp.wheels.length) throw new AppError(404, 'CAMPAIGN_NOT_FOUND');
+    const stakes = new Set(camp.wheels.flatMap((w) => w.stakes.map((s) => s.code)));
+    const wheels = new Set(camp.wheels.map((w) => w.code));
+    for (const h of c.hands ?? []) {
+      if (!stakes.has(h.stake.trim())) throw new AppError(400, 'STAKE_NOT_FOUND', { stake: h.stake });
+    }
+    for (const sp of c.spins ?? []) {
+      if (!wheels.has(sp.wheel.trim().toLowerCase())) throw new AppError(404, 'WHEEL_NOT_FOUND', { wheel: sp.wheel });
+    }
+    return { ...c, code: camp.code };
+  }
+
+  private async applyCampaignPart(adminId: string, playerId: string, c: NonNullable<CreatePlayerDto['campaign']>) {
+    const hands = (c.hands ?? []).filter((h) => h.hands > 0);
+    if (hands.length) {
+      const { error } = await this.sb.db.rpc('ld_set_hands', {
+        p_campaign_code: c.code,
+        p_player_id: playerId,
+        p_entries: hands.map((h) => ({ stake: h.stake.trim(), hands: h.hands })),
+        p_mode: 'SET',
+        p_source: 'ADMIN',
+        p_admin_id: adminId,
+        p_note: c.note?.trim() || 'สร้าง account',
+      });
+      if (error) throwRpcError(error);
+    }
+    for (const sp of c.spins ?? []) {
+      const { error } = await this.sb.db.rpc('ld_adjust_spins', {
+        p_campaign_code: c.code,
+        p_player_id: playerId,
+        p_wheel_code: sp.wheel.trim().toLowerCase(),
+        p_delta: sp.delta,
+        p_reason: sp.reason.trim(),
+        p_admin_id: adminId,
+      });
+      if (error) throwRpcError(error);
+    }
+    return { code: c.code, hands, spins: c.spins ?? [] };
+  }
+
+  /** ลบ account ที่เพิ่งสร้าง (ใช้ตอนส่วนแคมเปญล้มเหลวเท่านั้น) */
+  private async deletePlayerHard(id: string) {
+    await this.sb.db.from('ld_hands_log').delete().eq('player_id', id);
+    await this.sb.db.from('ld_player_hands').delete().eq('player_id', id);
+    await this.sb.db.from('ld_spin_adjustments').delete().eq('player_id', id);
+    await this.sb.db.from('ld_players').delete().eq('id', id);
   }
 
   private async findByXpokerId(xpokerId: string) {
@@ -99,24 +198,24 @@ export class AdminService {
         .ilike('xpoker_player_id', xpokerId.replace(/[\\%_]/g, (c) => '\\' + c))
         .limit(1)
         .maybeSingle(),
-    ) as { id: string; username: string; club_code: string; club_name: string } | null;
+    ) as { id: string; username: string; club_code: string | null; club_name: string | null } | null;
     if (!row) return null;
     return {
       playerId: row.id,
       username: row.username,
-      club: { code: row.club_code.toUpperCase(), name: row.club_name },
+      club: row.club_code ? { code: row.club_code.toUpperCase(), name: row.club_name } : null,
     };
   }
 
   // ---------- clubs ----------
-  async listClubs() {
-    const rows = must(
-      await this.sb.db
-        .from('ld_clubs')
-        .select('code, name, username_prefix, xpoker_club_id')
-        .eq('is_active', true)
-        .order('code'),
-    ) as { code: string; name: string; username_prefix: string; xpoker_club_id: string | null }[];
+  /** admin ประจำ club เห็นแค่ club ตัวเอง */
+  async listClubs(actor?: AdminActor) {
+    let query = this.sb.db
+      .from('ld_clubs')
+      .select('code, name, username_prefix, xpoker_club_id')
+      .eq('is_active', true);
+    if (actor?.role === 'ADMIN') query = query.eq('id', actor.clubId!);
+    const rows = must(await query.order('code')) as { code: string; name: string; username_prefix: string; xpoker_club_id: string | null }[];
     return rows.map((c) => ({
       code: c.code.toUpperCase(),
       name: c.name,
@@ -129,6 +228,19 @@ export class AdminService {
    * หา club จาก: ชื่อเต็ม ("ComBank CLUB"), ตัวย่อ ("CB") หรือ X-Poker club ID ("1216343")
    * ไม่สนตัวพิมพ์เล็ก/ใหญ่
    */
+  private async clubById(id: string) {
+    const club = must(
+      await this.sb.db.from('ld_clubs').select('id, code, name, username_prefix').eq('id', id).maybeSingle(),
+    ) as { id: string; code: string; name: string; username_prefix: string } | null;
+    if (!club) throw new AppError(403, 'ADMIN_NO_CLUB');
+    return club;
+  }
+
+  /** ใช้โดย AdminsService ตอนสร้าง/แก้ admin ประจำ club */
+  async resolveClub(clubName: string) {
+    return this.findClub(clubName);
+  }
+
   private async findClub(clubName: string) {
     const raw = clubName.trim();
     const select = 'id, code, name, username_prefix';
@@ -152,12 +264,15 @@ export class AdminService {
   }
 
 
-  async listPlayers(q: ListPlayersQuery) {
+  async listPlayers(q: ListPlayersQuery, actor?: AdminActor) {
     let query = this.sb.db.from('ld_admin_players').select('*', { count: 'exact' });
+    // admin ประจำ club เห็นแค่ผู้เล่น club ตัวเอง (ไม่สน ?club= ที่ส่งมา)
+    if (actor?.role === 'ADMIN') query = query.eq('club_code', actor.club!.code.toLowerCase());
     if (q.spinStatus) query = query.eq('spin_status', q.spinStatus);
     if (q.prizeCode) query = query.eq('prize_code', q.prizeCode);
     if (q.fulfillment) query = query.eq('fulfillment_status', q.fulfillment);
-    if (q.club) query = query.eq('club_code', q.club.trim().toLowerCase());
+    if (q.club?.trim().toLowerCase() === 'none') query = query.is('club_id', null);
+    else if (q.club) query = query.eq('club_code', q.club.trim().toLowerCase());
     if (q.q) {
       const term = q.q.replace(/[,()%*\\]/g, ' ').trim();
       if (term) {
@@ -176,43 +291,86 @@ export class AdminService {
       total: count ?? 0,
       page: q.page,
       limit: q.limit,
-      items: (data as PlayerRow[]).map(toAdminPlayer),
+      items: (data as PlayerRow[]).map((r) => toAdminPlayer(r, actor)),
     };
   }
 
-  async getPlayer(id: string) {
-    return toAdminPlayer(await this.playerRow(id));
+  async getPlayer(id: string, actor?: AdminActor) {
+    return toAdminPlayer(await this.playerRow(id, actor), actor);
   }
 
-  async updatePlayer(id: string, dto: UpdatePlayerDto) {
-    await this.playerRow(id);
+  async updatePlayer(id: string, dto: UpdatePlayerDto, actor?: AdminActor) {
+    await this.playerRow(id, actor);
     const patch: Record<string, unknown> = {};
     if (dto.displayName !== undefined) patch.display_name = dto.displayName.trim();
     if (dto.isActive !== undefined) patch.is_active = dto.isActive;
+    // ใส่ / เปลี่ยน club ("" = เอาออก) — หลังจากนี้ admin ของ club นั้นถึงจะเห็นผู้เล่นคนนี้
+    if (dto.clubName !== undefined) {
+      patch.club_id = dto.clubName.trim() ? (await this.findClub(dto.clubName)).id : null;
+    }
     if (Object.keys(patch).length) {
       must(await this.sb.db.from('ld_players').update(patch).eq('id', id).select('id'));
     }
-    return this.getPlayer(id);
+    return this.getPlayer(id, actor);
   }
 
-  async resetPassword(id: string) {
-    const row = await this.playerRow(id);
+  /** SUPER เท่านั้น — รหัสใหม่ SUPER ดูย้อนหลังได้ (admin club ดูไม่ได้) */
+  async resetPassword(id: string, actor: AdminActor) {
+    if (actor.role !== 'SUPER') throw new AppError(403, 'SUPER_ADMIN_ONLY');
+    const row = await this.playerRow(id, actor);
     const password = generatePassword();
+    const enc = passwordVault.encrypt(password);
     must(
       await this.sb.db
         .from('ld_players')
-        .update({ password_hash: await bcrypt.hash(password, 10) })
+        .update({
+          password_hash: await bcrypt.hash(password, 10),
+          password_enc: enc,
+          password_scope: enc ? 'SUPER' : null,
+          password_changed_at: null,
+        })
         .eq('id', id)
         .select('id'),
     );
     return { id, username: row.username, newPassword: password };
   }
 
-  private async playerRow(id: string) {
+  /**
+   * เปิดดูรหัสของผู้เล่น (บันทึกทุกครั้งว่าใครดู)
+   *   SUPER  → รหัสที่ระบบออกให้ / ที่ SUPER reset
+   *   ADMIN  → เฉพาะลูก club ตัวเอง และเฉพาะรหัสตอนสร้าง account
+   *   ลูกค้าเปลี่ยนรหัสเองแล้ว → ไม่มีใครดูได้ (404 PASSWORD_NOT_AVAILABLE)
+   */
+  async viewPassword(id: string, actor: AdminActor) {
+    if (actor.role !== 'SUPER' && actor.role !== 'ADMIN') throw new AppError(403, 'SUPER_ADMIN_ONLY');
+    const row = await this.playerRow(id, actor);
+    const stored = must(
+      await this.sb.db.from('ld_players').select('password_enc, password_scope').eq('id', id).single(),
+    ) as { password_enc: string | null; password_scope: 'CLUB' | 'SUPER' | null };
+
+    const reason = row.password_changed_at
+      ? 'CHANGED_BY_PLAYER'
+      : !stored.password_scope
+        ? 'NOT_STORED'
+        : actor.role === 'ADMIN' && stored.password_scope !== 'CLUB'
+          ? 'RESET_BY_SUPER'
+          : null;
+    const password = reason ? null : passwordVault.decrypt(stored.password_enc);
+    if (!password) throw new AppError(404, 'PASSWORD_NOT_AVAILABLE', { reason: reason ?? 'NOT_STORED' });
+
+    must(await this.sb.db.from('ld_password_views').insert({ admin_id: actor.id, player_id: id }).select('id'));
+    return { id, username: row.username, password, scope: stored.password_scope };
+  }
+
+  /** admin ประจำ club: ผู้เล่น club อื่น = 404 (ไม่บอกว่ามีอยู่) */
+  private async playerRow(id: string, actor?: AdminActor) {
     const row = must(
       await this.sb.db.from('ld_admin_players').select('*').eq('id', id).maybeSingle(),
     ) as PlayerRow | null;
     if (!row) throw new AppError(404, 'PLAYER_NOT_FOUND');
+    if (actor?.role === 'ADMIN' && row.club_code?.toLowerCase() !== actor.club!.code.toLowerCase()) {
+      throw new AppError(404, 'PLAYER_NOT_FOUND');
+    }
     return row;
   }
 
@@ -365,7 +523,14 @@ export class AdminService {
   }
 }
 
-function toAdminPlayer(r: PlayerRow) {
+/** รหัสของผู้เล่นคนนี้ admin คนนี้เปิดดูได้ไหม */
+function passwordAvailable(r: PlayerRow, actor?: AdminActor) {
+  if (!actor || r.password_changed_at || !r.password_scope || !passwordVault.enabled()) return false;
+  if (actor.role === 'SUPER') return true;
+  return actor.role === 'ADMIN' && r.password_scope === 'CLUB';
+}
+
+function toAdminPlayer(r: PlayerRow, actor?: AdminActor) {
   return {
     id: r.id,
     username: r.username,
@@ -376,7 +541,9 @@ function toAdminPlayer(r: PlayerRow) {
     isActive: r.is_active,
     createdAt: r.created_at,
     createdBy: r.created_by,
-    club: { code: r.club_code.toUpperCase(), name: r.club_name },
+    club: r.club_code ? { code: r.club_code.toUpperCase(), name: r.club_name } : null,
+    passwordAvailable: passwordAvailable(r, actor),
+    passwordChangedByPlayer: !!r.password_changed_at,
     spinStatus: r.spin_status,
     spinId: r.spin_id,
     mainSegment: r.main_segment,
@@ -390,11 +557,6 @@ function toAdminPlayer(r: PlayerRow) {
   };
 }
 
-function generatePassword(len = 8) {
-  let s = '';
-  for (let i = 0; i < len; i++) s += PW_CHARS[randomInt(PW_CHARS.length)];
-  return s;
-}
 
 function csvCell(v: unknown) {
   if (v === null || v === undefined) return '';

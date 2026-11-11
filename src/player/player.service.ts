@@ -57,6 +57,30 @@ export class PlayerService {
     };
   }
 
+  async changePassword(playerId: string, dto: { currentPassword: string; newPassword: string }) {
+    const row = must(
+      await this.sb.db.from('ld_players').select('id, password_hash, is_active').eq('id', playerId).maybeSingle(),
+    ) as { id: string; password_hash: string; is_active: boolean } | null;
+    if (!row || !row.is_active) throw new AppError(403, 'PLAYER_DISABLED');
+    if (!(await bcrypt.compare(dto.currentPassword, row.password_hash))) {
+      throw new AppError(401, 'INVALID_CREDENTIALS');
+    }
+    if (dto.currentPassword === dto.newPassword) throw new AppError(400, 'PASSWORD_SAME');
+    must(
+      await this.sb.db
+        .from('ld_players')
+        .update({
+          password_hash: await bcrypt.hash(dto.newPassword, 10),
+          password_enc: null, // รหัสที่ลูกค้าตั้งเอง ไม่เก็บ — admin ดูไม่ได้
+          password_scope: null,
+          password_changed_at: new Date().toISOString(),
+        })
+        .eq('id', playerId)
+        .select('id'),
+    );
+    return { ok: true };
+  }
+
   async me(playerId: string) {
     const row = must(
       await this.sb.db.from('ld_admin_players').select('*').eq('id', playerId).maybeSingle(),
@@ -68,7 +92,7 @@ export class PlayerService {
       id: row.id,
       displayName: row.display_name,
       xpokerPlayerId: row.xpoker_player_id,
-      club: { code: row.club_code.toUpperCase(), name: row.club_name },
+      club: row.club_code ? { code: row.club_code.toUpperCase(), name: row.club_name } : null,
       handsCount: row.hands_count,
       halloweenEligible: row.hands_count >= HALLOWEEN_MIN_HANDS,
       spinStatus: row.spin_status,

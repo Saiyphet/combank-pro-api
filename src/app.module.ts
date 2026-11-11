@@ -6,8 +6,11 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { SupabaseModule } from './supabase/supabase.module';
 import { PlayerModule } from './player/player.module';
 import { AdminModule } from './admin/admin.module';
-import { HealthController } from './health.controller';
 import { CampaignModule } from './campaign/campaign.module';
+import { ImportsModule } from './imports/imports.module';
+import { ReportsModule } from './reports/reports.module';
+import { BannersModule } from './banners/banners.module';
+import { HealthController } from './health.controller';
 
 @Module({
   imports: [
@@ -25,7 +28,10 @@ import { CampaignModule } from './campaign/campaign.module';
     SupabaseModule,
     PlayerModule,
     AdminModule,
-    CampaignModule
+    CampaignModule,
+    ImportsModule,
+    ReportsModule,
+    BannersModule,
   ],
   controllers: [HealthController],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],

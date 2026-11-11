@@ -1,5 +1,7 @@
-import { CanActivate, ExecutionContext, Injectable, createParamDecorator } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, SetMetadata, createParamDecorator } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
+import { SupabaseService } from '../supabase/supabase.service';
 import { AppError } from './app-error';
 
 export interface JwtPayload {
@@ -32,13 +34,64 @@ export class PlayerGuard implements CanActivate {
   }
 }
 
+/** admin ที่กำลังเรียก API (โหลดจากฐานข้อมูลทุก request → ปิดบัญชี / เปลี่ยน role มีผลทันที) */
+export interface AdminActor {
+  id: string;
+  username: string;
+  role: 'SUPER' | 'STAFF' | 'ADMIN';
+  clubId: string | null;
+  club: { code: string; name: string } | null;
+}
+
+/** route ที่ admin ประจำ club (role ADMIN) ใช้ได้ — นอกนั้น ADMIN ได้ 403 CLUB_ADMIN_FORBIDDEN */
+export const CLUB_ADMIN_ALLOWED = 'clubAdminAllowed';
+export const ClubAdminAllowed = () => SetMetadata(CLUB_ADMIN_ALLOWED, true);
+
 @Injectable()
 export class AdminGuard implements CanActivate {
-  constructor(private readonly jwt: JwtService) { }
-  canActivate(ctx: ExecutionContext) {
-    return verify(this.jwt, ctx, 'admin');
+  constructor(
+    private readonly jwt: JwtService,
+    private readonly sb: SupabaseService,
+    private readonly reflector: Reflector,
+  ) { }
+
+  async canActivate(ctx: ExecutionContext) {
+    await verify(this.jwt, ctx, 'admin');
+    const req = ctx.switchToHttp().getRequest();
+    const { data, error } = await this.sb.db
+      .from('ld_admins')
+      .select('id, username, role, is_active, club_id, club:ld_clubs(code, name)')
+      .eq('id', req.user.sub)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) throw new AppError(401, 'UNAUTHORIZED');
+    if (!data.is_active) throw new AppError(403, 'ADMIN_DISABLED');
+
+    const club = (Array.isArray(data.club) ? data.club[0] : data.club) as { code: string; name: string } | null;
+    const actor: AdminActor = {
+      id: data.id,
+      username: data.username,
+      role: data.role,
+      clubId: data.club_id,
+      club: club ? { code: club.code.toUpperCase(), name: club.name } : null,
+    };
+    req.admin = actor;
+
+    if (actor.role === 'ADMIN') {
+      const allowed = this.reflector.getAllAndOverride<boolean>(CLUB_ADMIN_ALLOWED, [
+        ctx.getHandler(),
+        ctx.getClass(),
+      ]);
+      if (!allowed) throw new AppError(403, 'CLUB_ADMIN_FORBIDDEN');
+      if (!actor.clubId) throw new AppError(403, 'ADMIN_NO_CLUB');
+    }
+    return true;
   }
 }
+
+export const CurrentAdmin = createParamDecorator(
+  (_: unknown, ctx: ExecutionContext): AdminActor => ctx.switchToHttp().getRequest().admin,
+);
 
 export const CurrentUser = createParamDecorator(
   (_: unknown, ctx: ExecutionContext): JwtPayload => ctx.switchToHttp().getRequest().user,

@@ -9,6 +9,7 @@ import {
     ListCampaignSpinsQuery,
     MySpinsQuery,
     SetHandsDto,
+    WinnersQuery,
     UpdateCampaignDto,
 } from './campaign.dto';
 
@@ -20,6 +21,7 @@ interface CampaignRow {
     date_label: string | null;
     image_url: string | null;
     sort_order: number;
+    hands_sheet_url?: string | null;
 }
 
 interface WheelRow {
@@ -53,8 +55,8 @@ interface StatusRow {
     display_name: string;
     xpoker_player_id: string;
     is_active: boolean;
-    club_code: string;
-    club_name: string;
+    club_code: string | null;
+    club_name: string | null;
     wheel_code: string;
     wheel_sort: number;
     earned_from_hands: number;
@@ -71,8 +73,8 @@ interface SpinListRow {
     username: string;
     display_name: string;
     xpoker_player_id: string;
-    club_code: string;
-    club_name: string;
+    club_code: string | null;
+    club_name: string | null;
     prize_code: string;
     prize_type: string;
     prize_name: string;
@@ -100,7 +102,7 @@ interface PlayerRef {
     displayName: string;
     xpokerPlayerId: string;
     isActive: boolean;
-    club: { code: string; name: string };
+    club: { code: string; name: string | null } | null;
 }
 
 @Injectable()
@@ -152,6 +154,42 @@ export class CampaignService {
                     })),
                 };
             }),
+        };
+    }
+
+    /**
+     * ผู้ได้รางวัลล่าสุด (ทุกคน) สำหรับโชว์บนหน้าเว็บ — ชื่อ + X-Poker ID เต็ม · ไม่บอก club
+     * ไม่รวมรายการที่ admin ยกเลิก · isMe = รายการของผู้เล่นที่เรียกเอง
+     */
+    async winners(playerId: string, code: string, q: WinnersQuery) {
+        const camp = await this.campaign(code);
+        let query = this.sb.db
+            .from('ld_wheel_spin_list')
+            .select('spin_id, player_id, wheel_code, wheel_name, xpoker_player_id, display_name, prize_code, prize_type, prize_name, prize_value_lak, vip_days, spun_at', { count: 'exact' })
+            .eq('campaign_code', camp.code)
+            .neq('fulfillment_status', 'CANCELLED');
+        if (q.wheel) query = query.eq('wheel_code', q.wheel.trim().toLowerCase());
+        if (q.minValueLak) query = query.gte('prize_value_lak', q.minValueLak);
+        const from = (q.page - 1) * q.limit;
+        const { data, error, count } = await query
+            .order('spun_at', { ascending: false })
+            .range(from, from + q.limit - 1);
+        if (error) throw error;
+
+        return {
+            campaign: camp.code,
+            total: count ?? 0,
+            page: q.page,
+            limit: q.limit,
+            items: ((data ?? []) as SpinListRow[]).map((r) => ({
+                wheel: r.wheel_code,
+                wheelName: r.wheel_name,
+                player: { displayName: r.display_name, xpokerPlayerId: r.xpoker_player_id },
+                isMe: r.player_id === playerId,
+                prize: { code: r.prize_code, type: r.prize_type, name: r.prize_name, valueLak: r.prize_value_lak },
+                vipDays: r.vip_days,
+                spunAt: r.spun_at,
+            })),
         };
     }
 
@@ -264,6 +302,7 @@ export class CampaignService {
         return Promise.all(
             camps.map(async (c) => ({
                 ...card(c),
+                handsSheetUrl: c.hands_sheet_url ?? null,
                 wheels: (await this.wheels(c.id)).map((w) => ({
                     code: w.code,
                     name: w.name,
@@ -288,6 +327,7 @@ export class CampaignService {
         if (dto.dateLabel !== undefined) patch.date_label = dto.dateLabel?.trim() || null;
         if (dto.imageUrl !== undefined) patch.image_url = dto.imageUrl?.trim() || null;
         if (dto.sortOrder !== undefined) patch.sort_order = dto.sortOrder;
+        if (dto.handsSheetUrl !== undefined) patch.hands_sheet_url = dto.handsSheetUrl.trim() || null;
         if (!Object.keys(patch).length) throw new AppError(400, 'NOTHING_TO_UPDATE');
         const row = must(
             await this.sb.db.from('ld_campaigns').update(patch).eq('id', camp.id).select('*').single(),
@@ -336,43 +376,62 @@ export class CampaignService {
         return this.playerDetail(camp, player.id, true);
     }
 
-    /** ผู้เล่นที่ร่วมแคมเปญ (มี hands / ถูกเพิ่มสิทธิ์ / เคยหมุน) — 1 แถวต่อคน */
+    /**
+     * ผู้เล่นทุก account (ยังไม่มี hands = 0 ทุกวง) — 1 แถวต่อคน
+     * ?joined=YES = เฉพาะคนที่ร่วมแคมเปญแล้ว (มี hands / ถูกเพิ่มสิทธิ์ / เคยหมุน)
+     */
     async listPlayers(code: string, q: ListCampaignPlayersQuery) {
         const camp = await this.campaign(code);
-        const rows = await fetchAll<StatusRow>((from, to) =>
-            this.sb.db
-                .from('ld_player_wheel_status')
-                .select('*')
-                .eq('campaign_code', camp.code)
-                .order('username')
-                .order('wheel_sort')
-                .range(from, to),
-        );
+        const [wheels, players, rows] = await Promise.all([
+            this.wheels(camp.id),
+            fetchAll<PlayerViewRow>((from, to) =>
+                this.sb.db
+                    .from('ld_admin_players')
+                    .select('id, username, display_name, xpoker_player_id, is_active, club_code, club_name')
+                    .order('username')
+                    .range(from, to),
+            ),
+            fetchAll<StatusRow>((from, to) =>
+                this.sb.db
+                    .from('ld_player_wheel_status')
+                    .select('player_id, wheel_code, earned_from_hands, adjusted, used, remaining')
+                    .eq('campaign_code', camp.code)
+                    .order('player_id')
+                    .order('wheel_code')
+                    .range(from, to) as never,
+            ),
+        ]);
 
-        const map = new Map<string, StatusRow[]>();
-        for (const r of rows) map.set(r.player_id, [...(map.get(r.player_id) ?? []), r]);
-        let items = [...map.values()].map((list) => {
-            const r = list[0];
-            const wheels = list.map((w) => ({
-                code: w.wheel_code,
-                earned: w.earned_from_hands + w.adjusted,
-                used: w.used,
-                remaining: w.remaining,
-            }));
+        const byPlayer = new Map<string, StatusRow[]>();
+        for (const r of rows) byPlayer.set(r.player_id, [...(byPlayer.get(r.player_id) ?? []), r]);
+
+        let items = players.map((p) => {
+            const list = byPlayer.get(p.id) ?? [];
+            const ws = wheels.map((w) => {
+                const r = list.find((x) => x.wheel_code === w.code);
+                return {
+                    code: w.code,
+                    earned: r ? r.earned_from_hands + r.adjusted : 0,
+                    used: r?.used ?? 0,
+                    remaining: r?.remaining ?? 0,
+                };
+            });
             return {
-                playerId: r.player_id,
-                username: r.username,
-                displayName: r.display_name,
-                xpokerPlayerId: r.xpoker_player_id,
-                isActive: r.is_active,
-                club: { code: r.club_code.toUpperCase(), name: r.club_name },
-                totalRemaining: wheels.reduce((a, w) => a + w.remaining, 0),
-                totalUsed: wheels.reduce((a, w) => a + w.used, 0),
-                wheels,
+                playerId: p.id,
+                username: p.username,
+                displayName: p.display_name,
+                xpokerPlayerId: p.xpoker_player_id,
+                isActive: p.is_active,
+                club: p.club_code ? { code: p.club_code.toUpperCase(), name: p.club_name } : null,
+                joined: list.length > 0,
+                totalRemaining: ws.reduce((a, w) => a + w.remaining, 0),
+                totalUsed: ws.reduce((a, w) => a + w.used, 0),
+                wheels: ws,
             };
         });
 
-        if (q.club) items = items.filter((e) => e.club.code === q.club!.trim().toUpperCase());
+        if (q.club?.trim().toLowerCase() === 'none') items = items.filter((e) => !e.club);
+        else if (q.club) items = items.filter((e) => e.club?.code === q.club!.trim().toUpperCase());
         if (q.q) {
             const t = q.q.trim().toLowerCase();
             items = items.filter(
@@ -382,8 +441,12 @@ export class CampaignService {
                     e.displayName.toLowerCase().includes(t),
             );
         }
+        if (q.joined === 'YES') items = items.filter((e) => e.joined);
+        if (q.joined === 'NO') items = items.filter((e) => !e.joined);
         if (q.hasSpins === 'YES') items = items.filter((e) => e.totalRemaining > 0);
         if (q.hasSpins === 'NO') items = items.filter((e) => e.totalRemaining === 0);
+        // ร่วมแคมเปญแล้วขึ้นก่อน → สิทธิ์เหลือมากก่อน
+        items.sort((a, b) => Number(b.joined) - Number(a.joined) || b.totalRemaining - a.totalRemaining || a.username.localeCompare(b.username));
 
         const from = (q.page - 1) * q.limit;
         return { total: items.length, page: q.page, limit: q.limit, items: items.slice(from, from + q.limit) };
@@ -752,8 +815,8 @@ interface PlayerViewRow {
     display_name: string;
     xpoker_player_id: string;
     is_active: boolean;
-    club_code: string;
-    club_name: string;
+    club_code: string | null;
+    club_name: string | null;
 }
 
 function toPlayerRef(r: PlayerViewRow): PlayerRef {
@@ -763,7 +826,7 @@ function toPlayerRef(r: PlayerViewRow): PlayerRef {
         displayName: r.display_name,
         xpokerPlayerId: r.xpoker_player_id,
         isActive: r.is_active,
-        club: { code: r.club_code.toUpperCase(), name: r.club_name },
+        club: r.club_code ? { code: r.club_code.toUpperCase(), name: r.club_name } : null,
     };
 }
 
@@ -789,7 +852,7 @@ function mapSpin(r: SpinListRow) {
                 username: r.username,
                 displayName: r.display_name,
                 xpokerPlayerId: r.xpoker_player_id,
-                club: { code: r.club_code?.toUpperCase(), name: r.club_name },
+                club: r.club_code ? { code: r.club_code.toUpperCase(), name: r.club_name } : null,
             }
             : undefined,
         prize: { code: r.prize_code, type: r.prize_type, name: r.prize_name, valueLak: r.prize_value_lak },

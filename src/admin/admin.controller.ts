@@ -13,7 +13,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
-import { AdminGuard, CurrentUser, JwtPayload } from '../common/auth.guards';
+import { AdminActor, AdminGuard, ClubAdminAllowed, CurrentAdmin, CurrentUser, JwtPayload } from '../common/auth.guards';
 import { LoginDto } from '../player/login.dto';
 import {
   CreatePlayerDto,
@@ -26,7 +26,7 @@ import { AdminService } from './admin.service';
 
 @Controller('admin')
 export class AdminController {
-  constructor(private readonly admin: AdminService) {}
+  constructor(private readonly admin: AdminService) { }
 
   @Throttle({ default: { limit: 5, ttl: 15 * 60_000 } })
   @Post('auth/login')
@@ -35,42 +35,64 @@ export class AdminController {
     return this.admin.login(dto);
   }
 
+  // ---- admin ประจำ club (ADMIN) ใช้ได้แค่: clubs, รายชื่อ/ดูผู้เล่น, ดูรหัส — เฉพาะ club ตัวเอง ----
+
   @UseGuards(AdminGuard)
+  @ClubAdminAllowed()
   @Get('clubs')
-  clubs() {
-    return this.admin.listClubs();
+  clubs(@CurrentAdmin() actor: AdminActor) {
+    return this.admin.listClubs(actor);
   }
 
+  /** SUPER / STAFF (admin ประจำ club สร้างไม่ได้ — account มาจาก import หรือ SUPER) */
   @UseGuards(AdminGuard)
   @Post('players')
-  createPlayer(@CurrentUser() user: JwtPayload, @Body() dto: CreatePlayerDto) {
-    return this.admin.createPlayer(user.sub, dto);
+  createPlayer(@CurrentAdmin() actor: AdminActor, @Body() dto: CreatePlayerDto) {
+    return this.admin.createPlayer(actor, dto);
   }
 
   @UseGuards(AdminGuard)
+  @ClubAdminAllowed()
   @Get('players')
-  listPlayers(@Query() q: ListPlayersQuery) {
-    return this.admin.listPlayers(q);
+  listPlayers(@CurrentAdmin() actor: AdminActor, @Query() q: ListPlayersQuery) {
+    return this.admin.listPlayers(q, actor);
   }
 
   @UseGuards(AdminGuard)
+  @ClubAdminAllowed()
   @Get('players/:id')
-  getPlayer(@Param('id', ParseUUIDPipe) id: string) {
-    return this.admin.getPlayer(id);
+  getPlayer(@CurrentAdmin() actor: AdminActor, @Param('id', ParseUUIDPipe) id: string) {
+    return this.admin.getPlayer(id, actor);
   }
 
+  /** แก้ชื่อ / เปิดปิด / ใส่ club (SUPER / STAFF) */
   @UseGuards(AdminGuard)
   @Patch('players/:id')
-  updatePlayer(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdatePlayerDto) {
-    return this.admin.updatePlayer(id, dto);
+  updatePlayer(
+    @CurrentAdmin() actor: AdminActor,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdatePlayerDto,
+  ) {
+    return this.admin.updatePlayer(id, dto, actor);
   }
 
+  /** SUPER เท่านั้น */
   @UseGuards(AdminGuard)
   @Post('players/:id/reset-password')
   @HttpCode(200)
-  resetPassword(@Param('id', ParseUUIDPipe) id: string) {
-    return this.admin.resetPassword(id);
+  resetPassword(@CurrentAdmin() actor: AdminActor, @Param('id', ParseUUIDPipe) id: string) {
+    return this.admin.resetPassword(id, actor);
   }
+
+  /** ดูรหัส: SUPER ทุกคน · admin club เฉพาะลูก club ตัวเอง (รหัสตอนสร้าง account) — บันทึกทุกครั้ง */
+  @UseGuards(AdminGuard)
+  @ClubAdminAllowed()
+  @Get('players/:id/password')
+  viewPassword(@CurrentAdmin() actor: AdminActor, @Param('id', ParseUUIDPipe) id: string) {
+    return this.admin.viewPassword(id, actor);
+  }
+
+  // ---- ด้านล่าง: SUPER / STAFF เท่านั้น ----
 
   @UseGuards(AdminGuard)
   @Patch('spins/:id/fulfillment')

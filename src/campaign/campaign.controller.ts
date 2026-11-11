@@ -21,6 +21,7 @@ import {
     MySpinsQuery,
     SetHandsDto,
     ToggleActiveDto,
+    WinnersQuery,
     UpdateCampaignDto,
     WheelWeightsDto,
 } from './campaign.dto';
@@ -50,6 +51,13 @@ export class CampaignController {
     @Get(':code/me')
     me(@CurrentUser() user: JwtPayload, @Param(CODE) code: string) {
         return this.campaigns.myStatus(user.sub, code);
+    }
+
+    /** ผู้ได้รางวัลล่าสุด (ทุกคน, ID ถูกปิดบางส่วน) ?wheel=&minValueLak=&page=&limit= (สูงสุด 50) */
+    @UseGuards(PlayerGuard, CampaignTokenGuard)
+    @Get(':code/winners')
+    winners(@CurrentUser() user: JwtPayload, @Param(CODE) code: string, @Query() q: WinnersQuery) {
+        return this.campaigns.winners(user.sub, code, q);
     }
 
     /** ประวัติรางวัลของตัวเอง (เห็นเฉพาะของตัวเอง — ระบุตัวจาก token) ?wheel=&page=&limit= */

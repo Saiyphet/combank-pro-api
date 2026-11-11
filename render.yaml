@@ -26,5 +26,7 @@ services:
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: CORS_ORIGINS
-        sync: false            # https://www.laosunion.com,https://laosunion.com
+        sync: false            # URL ของ frontend เช่น https://lucky-draw-web.onrender.com
+      - key: PASSWORD_ENC_KEY
+        sync: false            # ข้อความสุ่มยาว ≥ 32 ตัว — ใช้เข้ารหัสรหัสผ่านที่ระบบออกให้ (ห้ามเปลี่ยนภายหลัง)
       # เปิด/ปิดโปรด้วย status ในตาราง ld_campaigns (admin API) — ไม่ใช้ CAMPAIGN_START / CAMPAIGN_END แล้ว
