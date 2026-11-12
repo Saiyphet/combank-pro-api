@@ -10,7 +10,17 @@ export interface JwtPayload {
   username?: string;
   /** player token ผูกกับโปร (login แยกต่อโปร) — ไม่มี = token Halloween แบบเดิม */
   cmp?: string;
+  /** player ยังใช้รหัสที่ระบบออกให้ → ต้องเปลี่ยนรหัสก่อนใช้ API อื่น (เฉพาะตอน FORCE_PASSWORD_CHANGE=true) */
+  pwc?: boolean;
 }
+
+/** บังคับเปลี่ยนรหัสครั้งแรก — เปิด/ปิดด้วย env (ค่าเริ่มต้น = ปิด จนกว่า frontend จะพร้อม) */
+export const forcePasswordChange = () =>
+  ['true', '1', 'yes'].includes((process.env.FORCE_PASSWORD_CHANGE ?? '').trim().toLowerCase());
+
+/** route ที่ player ใช้ได้แม้ยังไม่ได้เปลี่ยนรหัส (POST /me/password) */
+export const ALLOW_PASSWORD_CHANGE_PENDING = 'allowPasswordChangePending';
+export const AllowPasswordChangePending = () => SetMetadata(ALLOW_PASSWORD_CHANGE_PENDING, true);
 
 async function verify(jwt: JwtService, ctx: ExecutionContext, role: JwtPayload['role']) {
   const req = ctx.switchToHttp().getRequest();
@@ -28,9 +38,36 @@ async function verify(jwt: JwtService, ctx: ExecutionContext, role: JwtPayload['
 
 @Injectable()
 export class PlayerGuard implements CanActivate {
-  constructor(private readonly jwt: JwtService) { }
-  canActivate(ctx: ExecutionContext) {
-    return verify(this.jwt, ctx, 'player');
+  constructor(
+    private readonly jwt: JwtService,
+    private readonly sb: SupabaseService,
+    private readonly reflector: Reflector,
+  ) { }
+
+  async canActivate(ctx: ExecutionContext) {
+    await verify(this.jwt, ctx, 'player');
+    const req = ctx.switchToHttp().getRequest();
+    const user: JwtPayload = req.user;
+
+    // token ที่ออกตอนยังใช้รหัสระบบ → ต้องเปลี่ยนรหัสก่อน
+    if (user.pwc && forcePasswordChange()) {
+      const allowed = this.reflector.getAllAndOverride<boolean>(ALLOW_PASSWORD_CHANGE_PENDING, [
+        ctx.getHandler(),
+        ctx.getClass(),
+      ]);
+      if (!allowed) {
+        // เช็คฐานข้อมูลเฉพาะ token ที่มี pwc — ถ้าเปลี่ยนรหัสไปแล้ว (เช่นจากอีกแท็บ) ให้ผ่าน
+        const { data, error } = await this.sb.db
+          .from('ld_players')
+          .select('password_scope')
+          .eq('id', user.sub)
+          .maybeSingle();
+        if (error) throw error;
+        if (!data) throw new AppError(401, 'UNAUTHORIZED');
+        if (data.password_scope) throw new AppError(403, 'PASSWORD_CHANGE_REQUIRED');
+      }
+    }
+    return true;
   }
 }
 

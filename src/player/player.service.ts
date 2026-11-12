@@ -3,6 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AppError, must, throwRpcError } from '../common/app-error';
+import { JwtPayload, forcePasswordChange } from '../common/auth.guards';
 import { PlayerRow, RpcSpinResult, mapRowSpin, mapRpcPrize } from '../common/mappers';
 import { WheelService } from './wheel.service';
 import { LoginDto } from './login.dto';
@@ -22,10 +23,10 @@ export class PlayerService {
     const user = must(
       await this.sb.db
         .from('ld_players')
-        .select('id, password_hash, is_active')
+        .select('id, password_hash, is_active, password_scope')
         .eq('username', dto.username.trim().toLowerCase())
         .maybeSingle(),
-    ) as { id: string; password_hash: string; is_active: boolean } | null;
+    ) as { id: string; password_hash: string; is_active: boolean; password_scope: string | null } | null;
 
     if (!user || !(await bcrypt.compare(dto.password, user.password_hash))) {
       throw new AppError(401, 'INVALID_CREDENTIALS');
@@ -41,9 +42,13 @@ export class PlayerService {
     if (!camp && campaign !== halloween) throw new AppError(404, 'CAMPAIGN_NOT_FOUND');
     if (camp?.status === 'COMING_SOON') throw new AppError(403, 'CAMPAIGN_NOT_OPEN');
 
-    const accessToken = await this.jwt.signAsync(
-      dto.campaign ? { sub: user.id, role: 'player', cmp: campaign } : { sub: user.id, role: 'player' },
-    );
+    // ยังใช้รหัสที่ระบบออกให้ (admin สร้าง / import / Super reset) → ต้องเปลี่ยนรหัสก่อน
+    // บัญชีเก่าที่ระบบไม่ได้เก็บรหัส (password_scope = null) ไม่ถูกบังคับ
+    const mustChangePassword = !!user.password_scope;
+    const payload: JwtPayload = { sub: user.id, role: 'player' };
+    if (dto.campaign) payload.cmp = campaign;
+    if (mustChangePassword && forcePasswordChange()) payload.pwc = true;
+    const accessToken = await this.jwt.signAsync(payload);
     const me = await this.me(user.id);
     return {
       accessToken,
@@ -53,11 +58,14 @@ export class PlayerService {
         displayName: me.displayName,
         spinStatus: me.spinStatus,
         halloweenEligible: me.halloweenEligible,
+        mustChangePassword,
       },
     };
   }
 
-  async changePassword(playerId: string, dto: { currentPassword: string; newPassword: string }) {
+  /** ลูกค้าเปลี่ยนรหัสเอง → ส่ง token ใหม่ (โปรเดิม, ไม่มี pwc) กลับไป ไม่ต้อง login ซ้ำ */
+  async changePassword(user: JwtPayload, dto: { currentPassword: string; newPassword: string }) {
+    const playerId = user.sub;
     const row = must(
       await this.sb.db.from('ld_players').select('id, password_hash, is_active').eq('id', playerId).maybeSingle(),
     ) as { id: string; password_hash: string; is_active: boolean } | null;
@@ -78,7 +86,10 @@ export class PlayerService {
         .eq('id', playerId)
         .select('id'),
     );
-    return { ok: true };
+    const payload: JwtPayload = { sub: playerId, role: 'player' };
+    if (user.cmp) payload.cmp = user.cmp;
+    const accessToken = await this.jwt.signAsync(payload);
+    return { ok: true, accessToken, campaign: user.cmp ?? (process.env.HALLOWEEN_CAMPAIGN_CODE || 'halloween-2026') };
   }
 
   async me(playerId: string) {

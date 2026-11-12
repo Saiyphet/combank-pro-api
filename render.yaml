@@ -29,4 +29,6 @@ services:
         sync: false            # URL ของ frontend เช่น https://lucky-draw-web.onrender.com
       - key: PASSWORD_ENC_KEY
         sync: false            # ข้อความสุ่มยาว ≥ 32 ตัว — ใช้เข้ารหัสรหัสผ่านที่ระบบออกให้ (ห้ามเปลี่ยนภายหลัง)
+      - key: FORCE_PASSWORD_CHANGE
+        value: "false"         # true = ผู้เล่นที่ยังใช้รหัสที่ระบบออกให้ ต้องเปลี่ยนรหัสก่อนใช้งาน (เปิดหลัง frontend deploy หน้าเปลี่ยนรหัสแล้ว)
       # เปิด/ปิดโปรด้วย status ในตาราง ld_campaigns (admin API) — ไม่ใช้ CAMPAIGN_START / CAMPAIGN_END แล้ว
