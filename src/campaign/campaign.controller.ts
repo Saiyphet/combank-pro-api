@@ -60,6 +60,13 @@ export class CampaignController {
         return this.campaigns.winners(user.sub, code, q);
     }
 
+    @UseGuards(PlayerGuard, CampaignTokenGuard)
+    @Throttle({ default: { limit: 30, ttl: 60_000 } })
+    @Get(':code/wheels/:wheel/leaderboard')
+    leaderboard(@CurrentUser() user: JwtPayload, @Param(CODE) code: string, @Param('wheel') wheel: string) {
+        return this.campaigns.tierStandings(user.sub, code, wheel);
+    }
+
     /** ประวัติรางวัลของตัวเอง (เห็นเฉพาะของตัวเอง — ระบุตัวจาก token) ?wheel=&page=&limit= */
     @UseGuards(PlayerGuard, CampaignTokenGuard)
     @Get(':code/me/spins')

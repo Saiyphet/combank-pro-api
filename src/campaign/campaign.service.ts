@@ -157,6 +157,35 @@ export class CampaignService {
         };
     }
 
+    async tierStandings(playerId: string, code: string, wheelCode: string) {
+        const wheel = await this.wheel(await this.campaign(code), wheelCode);
+        const stakes = wheel.stakes.map(stake => stake.id);
+        type Hand = { player_id: string; hands: number; player: { display_name: string } };
+        const hands = stakes.length ? await fetchAll<Hand>((from, to) =>
+            this.sb.db.from('ld_player_hands')
+                .select('player_id, hands, player:ld_players!inner(display_name,is_active)')
+                .in('stake_id', stakes).eq('player.is_active', true).gt('hands', 0)
+                .order('player_id').order('stake_id').range(from, to).overrideTypes<Hand[], { merge: false }>(),
+        ) : [];
+        const players = new Map<string, { id: string; name: string; hands: number }>();
+        for (const row of hands) {
+            const player = players.get(row.player_id);
+            if (player) player.hands += Number(row.hands);
+            else {
+                const letters = Array.from((row.player.display_name || '').trim().split(/\s+/u)[0]);
+                const name = letters.slice(0, letters.length > 3 ? 2 : 1).join('') + '***';
+                players.set(row.player_id, { id: row.player_id, name, hands: Number(row.hands) });
+            }
+        }
+        const sorted = [...players.values()].sort((a, b) => b.hands - a.hands || a.id.localeCompare(b.id));
+        let rank = 0;
+        const ranked = sorted.map((player, i) => {
+            if (!i || player.hands !== sorted[i - 1].hands) rank = i + 1;
+            return { rank, name: player.name, hands: player.hands, isMe: player.id === playerId };
+        });
+        return { rows: ranked.slice(0, 20), me: ranked.find(row => row.isMe) ?? null };
+    }
+
     /**
      * ผู้ได้รางวัลล่าสุด (ทุกคน) สำหรับโชว์บนหน้าเว็บ — ชื่อ + X-Poker ID เต็ม · ไม่บอก club
      * ไม่รวมรายการที่ admin ยกเลิก · isMe = รายการของผู้เล่นที่เรียกเอง
